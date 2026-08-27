@@ -1,8 +1,8 @@
 # Xagent Sandbox
 
-Sandbox runtime image for [Xagent](https://github.com/xorbitsai/xagent), an open-source framework for building and running AI agents. Agents delegate untrusted work — generated Python and JavaScript, shell commands, `uvx` MCP servers — to a sandbox built from this image, so tool calls never execute inside the Xagent backend.
+Sandbox runtime image for [Xagent](https://github.com/xorbitsai/xagent), an open-source framework for building and running AI agents. With sandboxing enabled, Xagent delegates untrusted work — generated Python and JavaScript, shell commands, `npx`/`uvx` MCP servers — to a sandbox built from this image rather than running it in the backend process.
 
-A sandbox is a **named, stateful workspace**, not a throwaway container. Xagent creates one on demand, keeps it alive, and execs into it for each subsequent tool call. Stopping a sandbox preserves its filesystem; the next request resumes it. Xagent can also commit a sandbox's filesystem to a snapshot and use that snapshot — rather than this image — as the template for a new one.
+A sandbox is a **named, stateful workspace**, not a throwaway container. Xagent creates one on demand, keeps it alive, and execs into it for each subsequent tool call. Stopping a sandbox preserves its filesystem; the next request resumes it. On the Docker backend, Xagent can also commit a sandbox's filesystem to a snapshot and use that snapshot — rather than this image — as the template for a new one; the Boxlite backend does not support snapshots.
 
 This image is that starting template. It has no service of its own: its `CMD` is a plain `bash`, which Xagent replaces with a long-running idle process.
 
@@ -18,18 +18,20 @@ The Python set comes only from the dedicated `sandbox` dependency group in Xagen
 
 ## Isolation
 
+Sandboxing is opt-in: Xagent runs tool calls in the backend process unless `SANDBOX_ENABLED=true`, and falls back to the backend when no sandbox backend is available or a tool cannot be wrapped. What follows applies to work that does reach a sandbox.
+
 The isolation comes from how the sandbox is run, not from this image. Xagent's Docker backend applies `no-new-privileges`, CPU and memory limits, and optional network isolation; its Boxlite backend runs the sandbox inside a KVM microVM. See [docker/README.md](https://github.com/xorbitsai/xagent/blob/main/docker/README.md) for the two modes and their trade-offs.
 
 The image itself defines an unprivileged `sandbox` user (uid 1100, gid 1010) as its default. Note that Xagent's Docker backend deliberately overrides this and runs the container as root, to match the file access behavior of the Boxlite backend.
 
 ## Tags
 
-- `latest` — the most recent release
-- `X.Y.Z` — semantic version tags matching [Xagent releases](https://github.com/xorbitsai/xagent/releases)
+- `latest` — the most recently published build
+- `X.Y.Z` — published from the matching Git tag; see [Xagent releases](https://github.com/xorbitsai/xagent/releases)
 
 Built for `linux/amd64` and `linux/arm64`.
 
-Pin an explicit version in production. Xagent's sandbox Compose overlays pin one, and rolling back is just restoring the previous tag.
+Pin an explicit version in production; Xagent's sandbox Compose overlays pin one. Changing that pin is not a free rollback: Xagent reconciles running sandboxes against the new image spec, stopping, deleting and recreating them. Bind-mounted workspace and upload data survives; the container's writable layer — `/tmp`, `$HOME`, packages a tool installed at run time — does not. Drain or back up that state before switching tags.
 
 ## Usage
 
@@ -48,13 +50,17 @@ docker run --rm -it xprobe/xagent-sandbox:latest bash
 
 ## Building a custom sandbox image
 
-A replacement image must provide, on `PATH`:
+A replacement image has to stay runtime-compatible with [`docker/Dockerfile.sandbox`](https://github.com/xorbitsai/xagent/blob/main/docker/Dockerfile.sandbox), which is the easiest starting point. Every sandbox needs, on `PATH`:
 
-- `python` — Xagent runs Python tool code as `python -c ...`
-- `node` — and JavaScript tool code as `node -e ...`
-- `uvx` — Xagent no longer installs `uv` dynamically
+- `python` and `node` — tool code runs as `python -c ...` and `node -e ...`
+- `pip` — tools install their declared dependencies after the container starts
+- `cat`, `rm`, `mkdir`, `/bin/sh`, and a writable `/tmp` — staging input, reading results back, cleanup
+- `tail` — the Docker backend replaces the image's `CMD` with `tail -f /dev/null` to hold the container open
 
-Start from [`docker/Dockerfile.sandbox`](https://github.com/xorbitsai/xagent/blob/main/docker/Dockerfile.sandbox).
+Only if you use the matching feature:
+
+- `npx` — sandboxed `npx` MCP servers
+- `uvx` — sandboxed `uvx` MCP servers; Xagent no longer installs `uv` dynamically
 
 ## Links
 
