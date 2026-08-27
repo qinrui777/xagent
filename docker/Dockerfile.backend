@@ -120,7 +120,6 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    docker.io \
     gnupg \
     openssl \
     libreoffice \
@@ -160,6 +159,37 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg -
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI only -- no daemon runs in this container. Debian's docker.io
+# package ships the full engine plus containerd, runc and tini (~256 MB
+# installed on amd64) for a client that only ever talks to a socket: xagent's
+# own Docker access goes through the Python SDK (src/xagent/sandbox/
+# docker_sandbox.py, src/xagent/core/tools/core/mcp/docker_manager.py), and
+# docker/docker-compose.sandbox.docker.yml bind-mounts the HOST's
+# /var/run/docker.sock and sets DOCKER_HOST.
+#
+# The package is replaced rather than dropped. command_policy.py gates the
+# agent's shell tool by path, not by an allowlist, so any executable under
+# /usr/bin is reachable -- an agent writing `docker ps` in a command_executor
+# call resolves /usr/bin/docker today and would start failing with "command
+# not found". docker-ce-cli keeps that binary at ~45 MB installed.
+#
+# Two details are load-bearing for the arm64 image (docker-publish.yml
+# publishes amd64 + arm64):
+#   - arch must come from `dpkg --print-architecture`, NOT be hardcoded. The
+#     Chrome branch below hardcodes arch=amd64 only because it sits inside an
+#     amd64-only branch; download.docker.com's bookworm pool carries
+#     docker-ce-cli for both published arches.
+#   - --no-install-recommends, or docker-buildx-plugin and
+#     docker-compose-plugin come back in as Recommends.
+# The keyring and source list are removed in the same layer once installed,
+# mirroring the Chrome branch below.
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/docker.list /usr/share/keyrings/docker.gpg
 
 # Browser for the built-in "chrome" MCP connector (chrome-devtools-mcp).
 # Gated behind INSTALL_CHROME (default true: the default build invocation is

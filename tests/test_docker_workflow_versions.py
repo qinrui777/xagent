@@ -212,6 +212,29 @@ def test_backend_runtime_keeps_uv_binaries() -> None:
     assert dockerfile.count("COPY --from=uv /uv /uvx /usr/local/bin/") == 2
 
 
+def test_backend_dockerfile_installs_docker_cli_without_the_daemon() -> None:
+    """No daemon runs in this container -- every Docker call goes through the
+    Python SDK over the host socket bind-mounted by
+    docker-compose.sandbox.docker.yml -- so Debian's docker.io (engine +
+    containerd + runc) is dead weight. It is swapped for docker-ce-cli rather
+    than dropped: command_policy.py gates the agent shell tool by path, so
+    /usr/bin/docker must keep existing or `docker ps` in a command_executor
+    call regresses to "command not found".
+    """
+    dockerfile = read_repo_file("docker/Dockerfile.backend")
+
+    assert "docker-ce-cli" in dockerfile
+    assert "\n    docker.io \\" not in dockerfile
+    # Hardcoding an arch here would break the arm64 image (docker-publish.yml
+    # publishes amd64 + arm64); --no-install-recommends keeps
+    # docker-buildx-plugin/docker-compose-plugin out.
+    assert (
+        "arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg"
+        in dockerfile
+    )
+    assert "--no-install-recommends docker-ce-cli" in dockerfile
+
+
 def test_backend_package_version_is_vcs_based_for_normal_builds() -> None:
     pyproject = read_repo_file("pyproject.toml")
 
