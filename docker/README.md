@@ -389,8 +389,7 @@ group from the lockfile and checks all supported imports during the image build.
 The build stage does not copy `pyproject.toml` or `uv.lock` into the runtime
 image.
 
-Custom `SANDBOX_IMAGE` images used with sandboxed uvx MCP connections must
-provide `uvx` on `PATH`; Xagent no longer installs uv dynamically.
+Custom `SANDBOX_IMAGE` images must provide `python`, `node`, and `uvx` on `PATH`. Xagent runs Python and JavaScript tool code as `python -c ...` and `node -e ...` (see `Sandbox.run_code` in `src/xagent/sandbox/base.py`), and it no longer installs uv dynamically for sandboxed uvx MCP connections.
 
 ```bash
 docker buildx build \
@@ -406,6 +405,8 @@ manual tags. After a new sandbox tag is published, update the `SANDBOX_IMAGE`
 pins in `docker/docker-compose.sandbox.boxlite.yml` and
 `docker/docker-compose.sandbox.docker.yml` to reference it. Rolling back only
 requires restoring the previous sandbox image tag.
+
+The same workflow publishes `docker/README.sandbox.md` as the Docker Hub overview for [`xprobe/xagent-sandbox`](https://hub.docker.com/r/xprobe/xagent-sandbox). That file is the public description of the image, so keep it in step with changes to the `sandbox` dependency group, the runtime requirements above, or the sandbox lifecycle. It only reaches Docker Hub when the image is published, so an edit merged without a release tag will not appear until the next publish.
 
 ### Frontend
 
