@@ -389,7 +389,7 @@ group from the lockfile and checks all supported imports during the image build.
 The build stage does not copy `pyproject.toml` or `uv.lock` into the runtime
 image.
 
-Custom `SANDBOX_IMAGE` images must provide `python`, `node`, and `uvx` on `PATH`. Xagent runs Python and JavaScript tool code as `python -c ...` and `node -e ...` (see `Sandbox.run_code` in `src/xagent/sandbox/base.py`), and it no longer installs uv dynamically for sandboxed uvx MCP connections.
+Custom `SANDBOX_IMAGE` images must provide `python`, `node`, and `uvx` on `PATH`. Xagent runs Python and JavaScript tool code as `python -c ...` and `node -e ...` (see `Sandbox.run_code` in `src/xagent/sandbox/base.py`), and it no longer installs `uv` dynamically for sandboxed `uvx` MCP connections.
 
 ```bash
 docker buildx build \
