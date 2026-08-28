@@ -881,20 +881,6 @@ jobs:
     steps:
       - name: Check required jobs
         shell: bash
-        # Job results are a closed enum, but keeping the interpolations out of
-        # the script body matches test-migrations.yml and leaves nothing to
-        # re-check if a future value ever stops being one.
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          PREPARE_DEEPDOC_CACHE_RESULT: ${{ needs['prepare-deepdoc-cache'].result }}
-          PRE_COMMIT_RESULT: ${{ needs['pre-commit'].result }}
-          PYTEST_FAST_RESULT: ${{ needs['pytest-fast'].result }}
-          PYTEST_FAST_DEEPDOC_RESULT: ${{ needs['pytest-fast-deepdoc'].result }}
-          PYTEST_SLOW_RESULT: ${{ needs['pytest-slow'].result }}
-          E2E_RESULT: ${{ needs.e2e.result }}
-          FRONTEND_BUILD_RESULT: ${{ needs['frontend-build'].result }}
-          CHANGES_CODE: ${{ needs.changes.outputs.code }}
-          CHANGES_FRONTEND: ${{ needs.changes.outputs.frontend }}
         run: |
           set -e
 
@@ -908,14 +894,14 @@ jobs:
             fi
           }
 
-          check_job "changes" "$CHANGES_RESULT"
-          check_job "prepare-deepdoc-cache" "$PREPARE_DEEPDOC_CACHE_RESULT"
-          check_job "pre-commit" "$PRE_COMMIT_RESULT"
-          check_job "pytest-fast" "$PYTEST_FAST_RESULT"
-          check_job "pytest-fast-deepdoc" "$PYTEST_FAST_DEEPDOC_RESULT"
-          check_job "pytest-slow" "$PYTEST_SLOW_RESULT"
-          check_job "e2e" "$E2E_RESULT"
-          check_job "frontend-build" "$FRONTEND_BUILD_RESULT"
+          check_job "changes" "${{ needs.changes.result }}"
+          check_job "prepare-deepdoc-cache" "${{ needs['prepare-deepdoc-cache'].result }}"
+          check_job "pre-commit" "${{ needs['pre-commit'].result }}"
+          check_job "pytest-fast" "${{ needs['pytest-fast'].result }}"
+          check_job "pytest-fast-deepdoc" "${{ needs['pytest-fast-deepdoc'].result }}"
+          check_job "pytest-slow" "${{ needs['pytest-slow'].result }}"
+          check_job "e2e" "${{ needs.e2e.result }}"
+          check_job "frontend-build" "${{ needs['frontend-build'].result }}"
 
           # The jobs above are gated at the step level, so an empty outputs
           # value would skip every step while the job still reports success --
@@ -935,7 +921,7 @@ jobs:
             esac
           }
 
-          check_flag "code" "$CHANGES_CODE"
-          check_flag "frontend" "$CHANGES_FRONTEND"
+          check_flag "code" "${{ needs.changes.outputs.code }}"
+          check_flag "frontend" "${{ needs.changes.outputs.frontend }}"
 
           exit "$failed"

@@ -28,6 +28,12 @@ const ciSummaryCondition =
   "always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)"
 const frontendSummaryCheckCommand =
   'check_job "frontend-build" "${{ needs[\'frontend-build\'].result }}"'
+// The single condition the frontend-build steps are allowed to carry. The rule
+// this guards is "no arbitrary condition can quietly disable a required step",
+// not "no condition at all" -- so the path filter that gates the whole job is
+// allowlisted by exact value and nothing else is. See
+// docs/branch-protection.md "Gate at the step, not at the job".
+const frontendGateCondition = "needs.changes.outputs.frontend == 'true'"
 const ciSummaryFailurePropagationCommands = [
   "set -e",
   "failed=0",
@@ -39,6 +45,7 @@ const ciSummaryFailurePropagationCommands = [
   "failed=1",
   "fi",
   "}",
+  'check_job "changes" "${{ needs.changes.result }}"',
   'check_job "prepare-deepdoc-cache" "${{ needs[\'prepare-deepdoc-cache\'].result }}"',
   'check_job "pre-commit" "${{ needs[\'pre-commit\'].result }}"',
   'check_job "pytest-fast" "${{ needs[\'pytest-fast\'].result }}"',
@@ -46,6 +53,21 @@ const ciSummaryFailurePropagationCommands = [
   'check_job "pytest-slow" "${{ needs[\'pytest-slow\'].result }}"',
   'check_job "e2e" "${{ needs.e2e.result }}"',
   frontendSummaryCheckCommand,
+  // A gated job whose flag is empty skips every step and still reports success,
+  // so the summary rejects anything but a literal true/false.
+  "check_flag() {",
+  'local name="$1"',
+  'local value="$2"',
+  'case "$value" in',
+  "true|false) ;;",
+  "*)",
+  "echo \"::error::changes.outputs.$name is '$value', expected true or false\"",
+  "failed=1",
+  ";;",
+  "esac",
+  "}",
+  'check_flag "code" "${{ needs.changes.outputs.code }}"',
+  'check_flag "frontend" "${{ needs.changes.outputs.frontend }}"',
   'exit "$failed"',
 ] as const
 const requiredFrontendSteps = [
@@ -277,10 +299,14 @@ function executeCiSummaryScript(source: string) {
     throw new Error("Check required jobs run must be a string")
   }
 
-  const expandedScript = checkStep.run.replace(
-    /\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.result \}\}/g,
-    "failure",
-  )
+  const expandedScript = checkStep.run
+    .replace(/\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.result \}\}/g, "failure")
+    // Gate flags expand to a well-formed value so that what the script exits on
+    // is the job results under test, not an unexpanded expression.
+    .replace(
+      /\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.outputs\.[A-Za-z0-9_-]+ \}\}/g,
+      "true",
+    )
   return spawnSync("bash", ["-c", expandedScript], { encoding: "utf8" })
 }
 
@@ -389,7 +415,7 @@ function assertSemanticWorkflowManifest(source: string) {
     if (step["working-directory"] !== "./frontend") {
       throw new Error(`${requiredStep.command} must use ./frontend`)
     }
-    if (step.if !== undefined) {
+    if (step.if !== undefined && step.if !== frontendGateCondition) {
       throw new Error(`${requiredStep.command} must not set if`)
     }
     if (step["continue-on-error"] !== undefined) {
@@ -420,8 +446,8 @@ describe("frontend CI test manifest", () => {
     const workflowSource = realWorkflowSource
     const source = replaceExactlyOnce(
       workflowSource,
-      "      - name: Run App Router tests\n        working-directory: ./frontend\n        run: npm run test:app-pages\n",
-      "      - run: npm run test:app-pages\n        env:\n          APP_ROUTER_TEST_MODE: manifest\n        working-directory: ./frontend\n        name: Run App Router tests\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        run: npm run test:app-pages\n",
+      "      - run: npm run test:app-pages\n        if: needs.changes.outputs.frontend == 'true'\n        env:\n          APP_ROUTER_TEST_MODE: manifest\n        working-directory: ./frontend\n        name: Run App Router tests\n",
       "App Router step presentation drift",
     )
     const followingJobs = source.slice(source.indexOf("\n  ci-summary:\n"))
@@ -576,8 +602,8 @@ describe("frontend CI test manifest", () => {
   it("rejects a later function-form check_job redefinition", () => {
     const source = replaceExactlyOnce(
       realWorkflowSource,
-      '          }\n\n          check_job "prepare-deepdoc-cache"',
-      '          }\n\n          function check_job { :; }\n\n          check_job "prepare-deepdoc-cache"',
+      '          }\n\n          check_job "changes"',
+      '          }\n\n          function check_job { :; }\n\n          check_job "changes"',
       "check_job redefinition",
     )
 
@@ -888,8 +914,8 @@ describe("frontend CI test manifest", () => {
     const workflowSource = realWorkflowSource
     const driftedSource = replaceExactlyOnce(
       workflowSource,
-      "      - name: Run App Router tests\n        working-directory: ./frontend\n        run: npm run test:app-pages\n",
-      "      - run: npm run test:app-pages\n        env:\n          APP_ROUTER_TEST_MODE: manifest\n        working-directory: ./frontend\n        name: Run App Router tests\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        run: npm run test:app-pages\n",
+      "      - run: npm run test:app-pages\n        if: needs.changes.outputs.frontend == 'true'\n        env:\n          APP_ROUTER_TEST_MODE: manifest\n        working-directory: ./frontend\n        name: Run App Router tests\n",
       "App Router step presentation drift",
     )
     const withoutAppStep = removeWorkflowStepByCommand(
@@ -908,7 +934,7 @@ describe("frontend CI test manifest", () => {
   it("rejects a same-job heredoc decoy after the real pages step is removed", () => {
     const withoutPagesStep = replaceExactlyOnce(
       realWorkflowSource,
-      "\n      - name: Run page component tests\n        working-directory: ./frontend\n        shell: bash\n        run: npm run test:pages\n",
+      "\n      - name: Run page component tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        shell: bash\n        run: npm run test:pages\n",
       "",
       "pages launcher step removal",
     )
@@ -954,7 +980,7 @@ describe("frontend CI test manifest", () => {
   it("rejects missing and duplicate KB directory steps", () => {
     const workflowSource = realWorkflowSource
     const kbStep =
-      "\n      - name: Run knowledge base component tests\n        working-directory: ./frontend\n        run: npm run test:kb-components\n"
+      "\n      - name: Run knowledge base component tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        run: npm run test:kb-components\n"
     const missing = replaceExactlyOnce(workflowSource, kbStep, "", "KB test step removal")
     const duplicate = replaceExactlyOnce(
       workflowSource,
@@ -976,21 +1002,23 @@ describe("frontend CI test manifest", () => {
   it("rejects a required step with the wrong working directory", () => {
     const source = replaceExactlyOnce(
       realWorkflowSource,
-      "      - name: Run App Router tests\n        working-directory: ./frontend\n",
-      "      - name: Run App Router tests\n        working-directory: .\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: .\n",
       "App Router working directory",
     )
 
-    expect(source).toContain("      - name: Run App Router tests\n        working-directory: .\n")
+    expect(source).toContain(
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: .\n",
+    )
     expect(() => assertSemanticWorkflowManifest(source)).toThrow(
       "npm run test:app-pages must use ./frontend",
     )
   })
 
-  it("rejects a required step-level condition", () => {
+  it("rejects a required step-level condition other than the path gate", () => {
     const source = replaceExactlyOnce(
       realWorkflowSource,
-      "      - name: Run App Router tests\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n",
       "      - name: Run App Router tests\n        if: github.event_name == 'schedule'\n",
       "App Router step condition",
     )
@@ -1004,8 +1032,8 @@ describe("frontend CI test manifest", () => {
   it("rejects custom shells on non-launcher required steps", () => {
     const source = replaceExactlyOnce(
       realWorkflowSource,
-      "      - name: Run App Router tests\n        working-directory: ./frontend\n",
-      "      - name: Run App Router tests\n        working-directory: ./frontend\n        shell: echo {0}\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n",
+      "      - name: Run App Router tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        shell: echo {0}\n",
       "App Router step shell",
     )
 
@@ -1031,8 +1059,8 @@ describe("frontend CI test manifest", () => {
       (source: string) =>
         replaceExactlyOnce(
           source,
-          "      - name: Run page component tests\n        working-directory: ./frontend\n        shell: bash\n",
-          "      - name: Run page component tests\n        working-directory: ./frontend\n        shell: echo {0}\n",
+          "      - name: Run page component tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        shell: bash\n",
+          "      - name: Run page component tests\n        if: needs.changes.outputs.frontend == 'true'\n        working-directory: ./frontend\n        shell: echo {0}\n",
           "pages launcher shell",
         ),
     ],
@@ -1118,7 +1146,7 @@ describe("frontend CI test manifest", () => {
       (source: string) =>
         replaceExactlyOnce(
           source,
-          "    needs:\n      - prepare-deepdoc-cache\n",
+          "    needs:\n      - changes\n      - prepare-deepdoc-cache\n",
           "    needs: prepare-deepdoc-cache\n",
           "ci-summary needs owner",
         ),

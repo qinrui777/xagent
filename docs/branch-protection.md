@@ -242,6 +242,15 @@ and that the paths-filter action stays pinned to its reviewed commit. Each of
 those assertions was confirmed to fail against a deliberately broken workflow
 before being committed.
 
+### Two contract tests own ci.yml
+
+`ci.yml` is guarded from both sides, and a change to it usually has to update both:
+
+- `tests/test_ci_summary_contract.py` (runs in `pytest-fast-deepdoc`) checks the properties above structurally, over the parsed YAML.
+- `frontend/src/ci/frontend-test-manifest.test.ts` (runs in `frontend-build`) freezes two regions by *exact text*: the `Check required jobs` script, whose non-comment lines must match a hard-coded list element for element, and the six required `frontend-build` test steps. It also executes the summary script under `bash` to prove failures propagate, so keep the `${{ needs.* }}` interpolations inline in `run:` -- moving them to `env:` leaves that execution with unset variables and silently guts the check.
+
+The frontend test rejects any `if:` on those six steps, because a condition there could quietly disable a required test. The path-filter gate is allowlisted by exact value (`frontendGateCondition`) and nothing else is, so the original rule still holds: no *arbitrary* condition can turn a required frontend step off.
+
 This is also why `CI Summary` had to become required at all: before it did, only
 the migration checks gated, and a PR with red `pytest`, `e2e` or `pre-commit`
 was mergeable. Three open PRs were in exactly that state when it was switched on.

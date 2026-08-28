@@ -11,6 +11,11 @@ while two properties hold:
 Both are prose in ``docs/branch-protection.md``. This module turns them into
 something that fails. See that document's "Required contexts must be summary
 jobs" and "Gate at the step, not at the job" sections for the reasoning.
+
+``ci.yml`` has a second contract test, ``frontend/src/ci/frontend-test-manifest.test.ts``,
+which freezes the summary script and the frontend-build steps by exact text. A
+change to either of those regions has to update both files or CI fails in the
+frontend lane.
 """
 
 from __future__ import annotations
@@ -77,7 +82,9 @@ _NoDuplicateKeyLoader.add_constructor(
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:
-    return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=_NoDuplicateKeyLoader)
+    return yaml.load(
+        CI_WORKFLOW.read_text(encoding="utf-8"), Loader=_NoDuplicateKeyLoader
+    )
 
 
 @pytest.fixture(scope="module")
