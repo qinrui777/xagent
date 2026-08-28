@@ -191,7 +191,7 @@ The required contexts are therefore the two summary jobs:
 | context | job | covers |
 | --- | --- | --- |
 | `Migrations Summary` | `test-migrations.yml` | `detect-migration-changes`, `Test SQLite Migrations`, `Test PostgreSQL Migrations` |
-| `CI Summary` | `ci.yml` | `pre-commit`, `pytest-fast`, `pytest-fast-deepdoc`, `pytest-slow`, `e2e`, `frontend-build`, `prepare-deepdoc-cache` |
+| `CI Summary` | `ci.yml` | `changes`, `pre-commit`, `pytest-fast`, `pytest-fast-deepdoc`, `pytest-slow`, `e2e`, `frontend-build`, `prepare-deepdoc-cache` |
 
 Both declare `if: always()` and fail unless every job they gather reports
 `success` -- a gathered job that is `skipped`, `failure` or `cancelled` fails
@@ -217,6 +217,30 @@ which reports success, which is the exact hole the summary exists to close.
 Adding a job to either workflow does not automatically gate on it. It has to be
 added to that summary's `needs` and to its `check_job` list, or it is advisory
 only.
+
+`ci.yml` follows the same shape. Its `changes` job reports which halves of the
+tree a pull request touches, and `pytest-fast`, `pytest-fast-deepdoc`,
+`pytest-slow`, `e2e` and `frontend-build` gate every one of their *steps* on
+that output. On a docs-only pull request those five jobs still start and still
+report `success`, in about twenty seconds each. Non-`pull_request` events --
+`merge_group`, `push` to `main`, `workflow_dispatch` -- never filter at all, so
+the queue re-runs the full suite against the tree that will actually land and
+stays the backstop for anything the filters get wrong.
+
+Step-level gating has a failure mode of its own that job-level gating does not:
+if the `changes` outputs come back empty, every step skips, the job reports
+`success`, and the summary goes green with nothing having run. A skipped job at
+least shows up grey in the UI; this one is green. `CI Summary` therefore also
+asserts that each output is a literal `true` or `false` and fails otherwise --
+that is the only way this summary can pass vacuously, so it is checked
+explicitly rather than trusted to the expression that produces it.
+
+`tests/test_ci_summary_contract.py` holds all of the above as tests: that
+`needs` and `check_job` name the same set of jobs, that no gathered job carries
+a condition beyond the draft guard, that every step of a gated job is guarded,
+and that the paths-filter action stays pinned to its reviewed commit. Each of
+those assertions was confirmed to fail against a deliberately broken workflow
+before being committed.
 
 This is also why `CI Summary` had to become required at all: before it did, only
 the migration checks gated, and a PR with red `pytest`, `e2e` or `pre-commit`
