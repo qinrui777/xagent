@@ -21,6 +21,7 @@ frontend lane.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 DRAFT_GUARD = (
     "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
@@ -52,6 +54,10 @@ CODE_FILTER_EXCLUDES = frozenset({"!docs/**", "!assets/**", "!*.md"})
 # commit. Bumping it must be deliberate -- update this constant in the same
 # change.
 PATHS_FILTER_PIN = "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
+
+# pulls.listFiles caps its response at this many files, and paths-filter does
+# not compare the rows it received against the pull request's changed_files.
+LIST_FILES_MAX = 3000
 
 
 class _NoDuplicateKeyLoader(yaml.SafeLoader):
@@ -95,6 +101,10 @@ def jobs(workflow: dict) -> dict:
 @pytest.fixture(scope="module")
 def summary(jobs: dict) -> dict:
     return jobs["ci-summary"]
+
+
+def _filter_step(jobs: dict) -> dict:
+    return next(step for step in jobs["changes"]["steps"] if step.get("id") == "filter")
 
 
 def _normalise(expression: str) -> str:
@@ -199,7 +209,7 @@ def test_paths_filter_is_pinned_by_commit(jobs: dict) -> None:
 
 
 def test_code_filter_exclusions_are_exactly_as_declared(jobs: dict) -> None:
-    step = next(step for step in jobs["changes"]["steps"] if step.get("id") == "filter")
+    step = _filter_step(jobs)
     filters = yaml.safe_load(step["with"]["filters"])
 
     excludes = {p for p in filters["code"] if p.startswith("!")}
@@ -231,3 +241,43 @@ def test_non_pull_request_events_never_filter(jobs: dict) -> None:
             f"output '{output}' must use != 'false' so a missing filter output "
             "runs everything instead of silently skipping"
         )
+
+
+def test_a_truncated_file_list_runs_everything(jobs: dict) -> None:
+    """paths-filter cannot see past the 3000th file, and does not notice.
+
+    It paginates pulls.listFiles without comparing the rows it got back to
+    changed_files, so a larger pull request whose visible portion is all
+    excluded paths yields a genuine `false` with code after the cutoff.
+    """
+    for output in sorted(set(GATED_JOBS.values())):
+        expression = _normalise(jobs["changes"]["outputs"][output])
+        assert (
+            f"github.event.pull_request.changed_files > {LIST_FILES_MAX}" in expression
+        ), (
+            f"output '{output}' must fall back to true once the pull request "
+            f"exceeds {LIST_FILES_MAX} files, which truncates the file list "
+            f"paths-filter reads; got {expression!r}"
+        )
+        assert "github.event.pull_request.changed_files == null" in expression, (
+            f"output '{output}' must also fall back to true when the file count "
+            "is unavailable -- an absent count compares as 0 and would pass the "
+            "size check silently"
+        )
+
+
+def test_frontend_filter_covers_the_readme_the_wheel_needs(jobs: dict) -> None:
+    """frontend-build is the only job that builds a wheel.
+
+    pyproject points `readme` at a root markdown file, which `code` excludes, so
+    unless the frontend filter names it too, renaming it skips that build.
+    """
+    readme = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["readme"]
+    filters = yaml.safe_load(_filter_step(jobs)["with"]["filters"])
+
+    assert readme in filters["frontend"], (
+        f"pyproject declares readme = {readme!r}, so it is a wheel build input, "
+        f"but the frontend filter is {filters['frontend']}. A pull request "
+        "touching only that file would skip 'Verify package bundles the "
+        "frontend', the one step that builds the wheel."
+    )

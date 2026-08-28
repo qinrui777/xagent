@@ -51,8 +51,20 @@ jobs:
       # `!= 'false'` rather than `== 'true'` so that a missing or empty filter
       # output lands on "run everything" instead of silently skipping. The
       # literal-value assertion in ci-summary is the other half of that guard.
-      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code != 'false' }}
-      frontend: ${{ github.event_name != 'pull_request' || steps.filter.outputs.frontend != 'false' }}
+      #
+      # The changed_files clauses are the third: pulls.listFiles caps at 3000
+      # files and paths-filter never checks the rows it got against that count.
+      # `== null` is not redundant -- an absent count compares as 0.
+      code: >-
+        ${{ github.event_name != 'pull_request'
+        || github.event.pull_request.changed_files == null
+        || github.event.pull_request.changed_files > 3000
+        || steps.filter.outputs.code != 'false' }}
+      frontend: >-
+        ${{ github.event_name != 'pull_request'
+        || github.event.pull_request.changed_files == null
+        || github.event.pull_request.changed_files > 3000
+        || steps.filter.outputs.frontend != 'false' }}
 
     steps:
       # No checkout: on pull_request the action reads the changed file list from
@@ -83,6 +95,10 @@ jobs:
               # `packages`/`artifacts` config and asserts both the bundled
               # frontend and this module are inside it.
               - 'pyproject.toml'
+              # pyproject's `readme` target, and root markdown is excluded from
+              # `code` -- without this rule, renaming it skips the only job that
+              # builds a wheel.
+              - 'README.md'
               - 'src/xagent/web/__main__.py'
               - '.github/workflows/ci.yml'
 

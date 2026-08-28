@@ -235,12 +235,19 @@ asserts that each output is a literal `true` or `false` and fails otherwise --
 that is the only way this summary can pass vacuously, so it is checked
 explicitly rather than trusted to the expression that produces it.
 
+The detector has a blind spot in the same family. `paths-filter` reads the changed file list from `pulls.listFiles`, which returns at most 3000 files, and it never compares the rows it received against the pull request's own `changed_files` count -- so past that cutoff it can report a perfectly genuine `false` while code sits in the part it could not see. Both outputs therefore fall back to "run everything" once `changed_files` exceeds 3000, or if that count is missing entirely; an absent count compares as `0`, so the `== null` clause is doing real work rather than restating the size check.
+
+The `frontend` filter names `README.md` for a related reason: `pyproject.toml` declares it as the project `readme`, root markdown is excluded from `code`, and `frontend-build` owns the only `python -m build --wheel` in the workflow. Without that rule a pull request that renames or deletes the README skips the one job that would notice hatchling can no longer resolve it.
+
+
 `tests/test_ci_summary_contract.py` holds all of the above as tests: that
 `needs` and `check_job` name the same set of jobs, that no gathered job carries
 a condition beyond the draft guard, that every step of a gated job is guarded,
-and that the paths-filter action stays pinned to its reviewed commit. Each of
-those assertions was confirmed to fail against a deliberately broken workflow
-before being committed.
+that both outputs fall back to running everything on a truncated or missing file
+count, that the `frontend` filter still covers whatever `pyproject` points
+`readme` at, and that the paths-filter action stays pinned to its reviewed
+commit. Each of those assertions was confirmed to fail against a deliberately
+broken workflow before being committed.
 
 ### Two contract tests own ci.yml
 
