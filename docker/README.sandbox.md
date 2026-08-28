@@ -4,7 +4,7 @@ Sandbox runtime image for [Xagent](https://github.com/xorbitsai/xagent), an open
 
 A sandbox is a **named, stateful workspace**, not a throwaway container. Xagent creates one on demand, keeps it alive, and execs into it for each subsequent tool call. Stopping a sandbox preserves its filesystem; the next request resumes it. On the Docker backend, Xagent can also commit a sandbox's filesystem to a snapshot and use that snapshot — rather than this image — as the template for a new one; the Boxlite backend does not support snapshots.
 
-This image is that starting template. It has no service of its own: its `CMD` is a plain `bash`, which Xagent replaces with a long-running idle process.
+This image is that starting template. It has no service of its own: its `CMD` is a plain `bash`, which the Docker backend replaces with a long-running idle process.
 
 ## What's inside
 
@@ -27,7 +27,7 @@ The image itself defines an unprivileged `sandbox` user (uid 1100, gid 1010) as 
 ## Tags
 
 - `latest` — the most recently published build
-- `X.Y.Z` — published from the matching Git tag; see [Xagent releases](https://github.com/xorbitsai/xagent/releases)
+- `X.Y.Z` — published by pushing the matching Git tag, though a manual run can publish an arbitrary tag; see [Xagent releases](https://github.com/xorbitsai/xagent/releases)
 
 Built for `linux/amd64` and `linux/arm64`.
 
@@ -56,6 +56,7 @@ A replacement image has to stay runtime-compatible with [`docker/Dockerfile.sand
 - `pip` — tools install their declared dependencies after the container starts
 - `cat`, `rm`, `mkdir`, `/bin/sh`, and a writable `/tmp` — staging input, reading results back, cleanup
 - `tail` — the Docker backend replaces the image's `CMD` with `tail -f /dev/null` to hold the container open
+- `test`, `cp`, `mv`, and a writable `/var/tmp` — the Boxlite backend stages every file transfer there before moving it into place, because `/tmp` is a tmpfs mount it cannot copy into
 
 Only if you use the matching feature:
 

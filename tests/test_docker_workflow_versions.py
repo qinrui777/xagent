@@ -437,3 +437,23 @@ def test_sandbox_hub_description_gate_equals_the_image_push_gate() -> None:
 
     assert description["if"] == build["with"]["push"]
     assert "push_to_dockerhub == 'true'" in description["if"]
+
+
+def test_sandbox_hub_description_failure_does_not_fail_the_release() -> None:
+    step = sandbox_publish_step("Update Docker Hub repository description")
+
+    assert step["continue-on-error"] is True
+
+
+# WHY: the action truncates an oversized readme or short description and only
+# warns, so drift past a Hub limit ships silently with the run still green.
+def test_sandbox_hub_description_inputs_fit_docker_hub_limits() -> None:
+    step = sandbox_publish_step("Update Docker Hub repository description")
+
+    readme = ROOT / step["with"]["readme-filepath"]
+    assert readme.is_file()
+    assert len(readme.read_bytes()) <= 25_000
+
+    short_description = step["with"]["short-description"]
+    assert short_description
+    assert len(short_description.encode("utf-8")) <= 100

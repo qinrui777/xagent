@@ -389,7 +389,7 @@ group from the lockfile and checks all supported imports during the image build.
 The build stage does not copy `pyproject.toml` or `uv.lock` into the runtime
 image.
 
-Custom `SANDBOX_IMAGE` images must stay runtime-compatible with `docker/Dockerfile.sandbox`. On `PATH` they need `python` and `node` (tool code runs as `python -c ...` and `node -e ...`, see `Sandbox.run_code` in `src/xagent/sandbox/base.py`), `pip` for run-time dependency installs, and `cat`, `rm`, `mkdir`, `/bin/sh` plus a writable `/tmp` for staging and cleanup; the Docker backend additionally needs `tail`, since it replaces the image `CMD` with `tail -f /dev/null`. `npx` and `uvx` are required only for sandboxed `npx`/`uvx` MCP connections — Xagent no longer installs `uv` dynamically.
+Custom `SANDBOX_IMAGE` images must stay runtime-compatible with `docker/Dockerfile.sandbox`. On `PATH` they need `python` and `node` (tool code runs as `python -c ...` and `node -e ...`, see `Sandbox.run_code` in `src/xagent/sandbox/base.py`), `pip` for run-time dependency installs, and `cat`, `rm`, `mkdir`, `/bin/sh` plus a writable `/tmp` for staging and cleanup; the Docker backend additionally needs `tail`, since it replaces the image `CMD` with `tail -f /dev/null`, and the Boxlite backend additionally needs `test`, `cp`, `mv` and a writable `/var/tmp`, which it stages file transfers through because it cannot copy into the tmpfs `/tmp`. `npx` and `uvx` are required only for sandboxed `npx`/`uvx` MCP connections — Xagent no longer installs `uv` dynamically.
 
 ```bash
 docker buildx build \
@@ -520,8 +520,9 @@ GHCR publishing.
      - Create at: https://hub.docker.com/settings/security
      - "Read & Write" is enough to push images. The sandbox workflow also
        updates the `xprobe/xagent-sandbox` Hub description with this same
-       token, which needs "Read, Write, Delete" scope and Admin access on
-       the repository
+       token; that step additionally needs "Read, Write, Delete" scope and
+       Admin access on the repository, and is allowed to fail without
+       failing the release when the token lacks them
 
 2. Ensure Docker Hub repositories exist:
    - `xprobe/xagent-backend`
