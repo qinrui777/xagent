@@ -85,6 +85,7 @@ const codeFilterRules = ["**", "!docs/**", "!assets/**", "!*.md", "!frontend/src
 const frontendFilterRules = [
   "frontend/**",
   "pyproject.toml",
+  ".gitignore",
   "README.md",
   "src/xagent/web/__main__.py",
   ".github/workflows/ci.yml",
@@ -292,7 +293,10 @@ function getNonEmptyScriptCommands(run: string) {
     .filter(({ value }) => value !== "" && !value.startsWith("#"))
 }
 
-function executeCiSummaryScript(source: string) {
+function executeCiSummaryScript(
+  source: string,
+  { jobResult = "failure", flagValue = "true" }: { jobResult?: string; flagValue?: string } = {},
+) {
   const workflow = parseWorkflowDocument(source).toJS({ maxAliasCount: 100 })
   requireRecord(workflow, "workflow root")
   requireRecord(workflow.jobs, "jobs")
@@ -311,12 +315,12 @@ function executeCiSummaryScript(source: string) {
   }
 
   const expandedScript = checkStep.run
-    .replace(/\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.result \}\}/g, "failure")
-    // Gate flags expand to a well-formed value so that what the script exits on
-    // is the job results under test, not an unexpanded expression.
+    .replace(/\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.result \}\}/g, jobResult)
+    // Both halves default to isolating the other: job results under test with
+    // well-formed flags, or flags under test with every job green.
     .replace(
       /\$\{\{ needs(?:\[['"][^'"]+['"]\]|\.[A-Za-z0-9_-]+)\.outputs\.[A-Za-z0-9_-]+ \}\}/g,
-      "true",
+      flagValue,
     )
   return spawnSync("bash", ["-c", expandedScript], { encoding: "utf8" })
 }
@@ -694,6 +698,27 @@ describe("frontend CI test manifest", () => {
 
     expect(result.error).toBeUndefined()
     expect(result.status).toBe(1)
+  })
+
+  it("passes the summary when every job succeeded and both gate flags are literal", () => {
+    const result = executeCiSummaryScript(realWorkflowSource, {
+      jobResult: "success",
+      flagValue: "true",
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+  })
+
+  it("fails the summary when a gate flag is not a literal true or false", () => {
+    const result = executeCiSummaryScript(realWorkflowSource, {
+      jobResult: "success",
+      flagValue: "",
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain("::error::changes.outputs.code is ''")
   })
 
   it("rejects an early return in check_job that leaves failed clear", () => {

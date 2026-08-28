@@ -222,7 +222,9 @@ only.
 tree a pull request touches, and `pytest-fast`, `pytest-fast-deepdoc`,
 `pytest-slow`, `e2e` and `frontend-build` gate every one of their *steps* on
 that output. On a docs-only pull request those five jobs still start and still
-report `success`, in about twenty seconds each. Non-`pull_request` events --
+report `success`, their own steps finishing in about twenty seconds.
+`prepare-deepdoc-cache` is not gated, so on a cache miss `pytest-fast-deepdoc`
+and `pytest-slow` wait on it first. Non-`pull_request` events --
 `merge_group`, `push` to `main`, `workflow_dispatch` -- never filter at all, so
 the queue re-runs the full suite against the tree that will actually land and
 stays the backstop for anything the filters get wrong.
@@ -237,7 +239,7 @@ explicitly rather than trusted to the expression that produces it.
 
 The detector has a blind spot in the same family. `paths-filter` reads the changed file list from `pulls.listFiles`, which returns at most 3000 files, and it never compares the rows it received against the pull request's own `changed_files` count -- so past that cutoff it can report a perfectly genuine `false` while code sits in the part it could not see. Both outputs therefore fall back to "run everything" once `changed_files` exceeds 3000, or if that count is missing entirely; an absent count compares as `0`, so the `== null` clause is doing real work rather than restating the size check.
 
-The `frontend` filter names `README.md` for a related reason: `pyproject.toml` declares it as the project `readme`, root markdown is excluded from `code`, and `frontend-build` owns the only `python -m build --wheel` in the workflow. Without that rule a pull request that renames or deletes the README skips the one job that would notice hatchling can no longer resolve it.
+The `frontend` filter names `.gitignore` because hatchling honours it when selecting the files that go into the wheel -- this repository's own `artifacts` override for `frontend_dist` exists precisely because gitignored paths are otherwise dropped -- and `frontend-build` runs the only step that inspects a built wheel. It names `README.md` for a related reason: `pyproject.toml` declares it as the project `readme`, root markdown is excluded from `code`, and `frontend-build` owns the only `python -m build --wheel` in the workflow. Without that rule a pull request that renames or deletes the README skips the one job that would notice hatchling can no longer resolve it.
 
 `code` excludes `frontend/src/**` and not `frontend/**`, which looks timid but is the widest exclusion that is actually safe: `tests/test_docker_workflow_versions.py` reads `frontend/package.json` and `tests/templates/test_manager.py` reads `frontend/public`, and `paths-filter` cannot express "exclude the directory but keep those two" -- once a pattern excludes a file, no later pattern includes it back. So a frontend-source-only pull request skips the Python lanes, while a `package.json` or asset change still runs them.
 
@@ -248,15 +250,21 @@ everything on a truncated or missing file count, that the `frontend` filter stil
 covers whatever `pyproject` points `readme` at, and that the paths-filter action
 stays pinned to its reviewed commit.
 
-Two of those assertions are narrower than they first look, because the obvious
-version of each passes while still being bypassable. A step guard is checked for
-*polarity*, not merely for naming the output: work steps must lead with
-`== 'true'` and may only add `&&` conjunctions, and the single `Skip` sentinel
-must be exactly `!= 'true'`. Inverting a work guard would otherwise skip the real
-tests on exactly the pull requests that need them, with the job still green. The
-pin is asserted on the step carrying `id: filter`, and `paths-filter` must appear
-in the job exactly once -- searching the job for the SHA would also accept a dead
-pinned step sitting beside a real gate on a mutable tag.
+Several of those assertions are narrower than they first look, because the
+obvious version of each passes while still being bypassable. A step guard is
+checked for *polarity*, not merely for naming the output: work steps must lead
+with `== 'true'`, the single `Skip` sentinel must be exactly `!= 'true'`, and any
+`&&` conjunct a work step adds has to match the matrix or cache predicates it is
+allowed to narrow itself with -- accepting an arbitrary conjunct would let
+`&& github.event_name == 'push'` skip the step on every pull request with the job
+still green. Guard polarity alone still describes a job that runs nothing, so
+each gated Python job must also carry a step invoking `python -m pytest`. The
+output expressions are frozen whole rather than checked for their clauses,
+because `&&` binds tighter than `||` and a rewritten chain keeps every clause
+while inverting what it means. The pin is asserted on the step carrying
+`id: filter`, and `paths-filter` must appear in the job exactly once -- searching
+the job for the SHA would also accept a dead pinned step sitting beside a real
+gate on a mutable tag.
 
 Each of these assertions was confirmed to fail against a deliberately broken
 workflow before being committed.

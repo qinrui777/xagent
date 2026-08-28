@@ -12,14 +12,16 @@ Both are prose in ``docs/branch-protection.md``. This module turns them into
 something that fails. See that document's "Required contexts must be summary
 jobs" and "Gate at the step, not at the job" sections for the reasoning.
 
-``ci.yml`` has a second contract test, ``frontend/src/ci/frontend-test-manifest.test.ts``,
-which freezes the summary script and the frontend-build steps by exact text. A
-change to either of those regions has to update both files or CI fails in the
-frontend lane.
+``ci.yml`` has a second contract test, ``frontend/src/ci/frontend-test-manifest.test.ts``.
+It freezes the summary script by exact text, and checks the six required
+frontend-build steps semantically -- command, working directory, shell, and an
+``if:`` that is either absent or exactly the path-filter gate. A change to either
+region has to update both files or CI fails in the frontend lane.
 """
 
 from __future__ import annotations
 
+import copy
 import re
 import tomllib
 from pathlib import Path
@@ -65,6 +67,9 @@ CODE_FILTER_EXCLUDES = frozenset(
 FRONTEND_FILTER_RULES = (
     "frontend/**",
     "pyproject.toml",
+    # Hatchling honours .gitignore when it selects the files that go into the
+    # wheel, so an edit there can silently drop one.
+    ".gitignore",
     "README.md",
     "src/xagent/web/__main__.py",
     ".github/workflows/ci.yml",
@@ -78,6 +83,24 @@ PATHS_FILTER_PIN = "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
 # pulls.listFiles caps its response at this many files, and paths-filter does
 # not compare the rows it received against the pull request's changed_files.
 LIST_FILES_MAX = 3000
+
+# The command each gated job exists to run. Correct guards still describe a job
+# whose real steps were deleted, which runs nothing and reports success.
+# frontend-build is absent: the TS contract pins its steps by exact command.
+GATED_JOB_WORK_COMMANDS = {
+    "pytest-fast": "python -m pytest",
+    "pytest-fast-deepdoc": "python -m pytest",
+    "pytest-slow": "python -m pytest",
+    "e2e": "python -m pytest",
+}
+
+# The only conjunctions a work step's gate may carry. Checking merely that the
+# condition *starts with* the gate also accepts `&& github.event_name == 'push'`,
+# which skips the step on every pull request while the job still reports success.
+WORK_GUARD_CONJUNCTS = (
+    re.compile(r"^\(matrix\.name == '[a-z0-9-]+'\)$"),
+    re.compile(r"^\(needs\.prepare-deepdoc-cache\.outputs\.cache-hit [!=]= 'true'\)$"),
+)
 
 
 class _NoDuplicateKeyLoader(yaml.SafeLoader):
@@ -211,17 +234,41 @@ def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None
             )
             continue
 
-        # Matrix and cache predicates are allowed, but only as further
-        # conjunctions -- the gate has to lead and cannot be OR-ed away.
+        # The gate has to lead and cannot be OR-ed away.
         assert condition == run_guard or condition.startswith(f"{run_guard} && "), (
             f"step '{label}' in job '{job_name}' is conditional on "
             f"{condition!r}; a work step must start with {run_guard!r} and may "
             "only add '&&' conjunctions"
         )
 
+        remainder = condition[len(run_guard) :].removeprefix(" && ")
+        for conjunct in filter(None, remainder.split(" && ")):
+            assert any(p.match(conjunct) for p in WORK_GUARD_CONJUNCTS), (
+                f"step '{label}' in job '{job_name}' adds the conjunct "
+                f"{conjunct!r} to its gate, which is not one of the matrix or "
+                "cache predicates a work step may narrow itself with. A "
+                "conjunct on the event or the pull request skips the step on "
+                "every pull request while the job still reports success."
+            )
+
     assert len(sentinels) == 1, (
         f"job '{job_name}' must have exactly one '{SKIP_SENTINEL_PREFIX}...' "
         f"sentinel step so it never reports an empty run; found {sentinels}"
+    )
+
+
+@pytest.mark.parametrize("job_name", sorted(GATED_JOB_WORK_COMMANDS))
+def test_a_gated_job_still_runs_its_test_command(jobs: dict, job_name: str) -> None:
+    """A correctly guarded job that no longer runs anything is still green."""
+    command = GATED_JOB_WORK_COMMANDS[job_name]
+    running = [
+        step for step in jobs[job_name]["steps"] if command in (step.get("run") or "")
+    ]
+
+    assert running, (
+        f"job '{job_name}' has no step running {command!r}. Every step of a "
+        "gated job is skippable by design, so without this the job reports "
+        "success having executed no tests at all."
     )
 
 
@@ -349,6 +396,32 @@ def test_a_truncated_file_list_runs_everything(jobs: dict) -> None:
         )
 
 
+def _expected_output_expression(output: str) -> str:
+    return (
+        "${{ github.event_name != 'pull_request'"
+        " || github.event.pull_request.changed_files == null"
+        f" || github.event.pull_request.changed_files > {LIST_FILES_MAX}"
+        f" || steps.filter.outputs.{output} != 'false' }}}}"
+    )
+
+
+def test_the_changes_outputs_are_exactly_as_declared(jobs: dict) -> None:
+    """The two tests above assert substrings, which precedence can defeat.
+
+    `&&` binds tighter than `||`, so a chain rewritten to use it keeps every
+    substring they look for while forcing the output to false on an ordinary
+    pull request -- skipping the whole suite.
+    """
+    for output in sorted(set(GATED_JOBS.values())):
+        expression = _normalise(jobs["changes"]["outputs"][output])
+        assert expression == _expected_output_expression(output), (
+            f"the '{output}' output expression changed. Each clause is a "
+            "fallback to running everything, and they have to stay a flat "
+            f"'||' chain. expected {_expected_output_expression(output)!r}, "
+            f"found {expression!r}"
+        )
+
+
 def test_frontend_filter_covers_the_readme_the_wheel_needs(jobs: dict) -> None:
     """frontend-build is the only job that builds a wheel.
 
@@ -364,3 +437,51 @@ def test_frontend_filter_covers_the_readme_the_wheel_needs(jobs: dict) -> None:
         "touching only that file would skip 'Verify package bundles the "
         "frontend', the one step that builds the wheel."
     )
+
+
+def _mutated(jobs: dict) -> dict:
+    return copy.deepcopy(jobs)
+
+
+def _step(jobs: dict, job_name: str, step_name: str) -> dict:
+    return next(
+        step for step in jobs[job_name]["steps"] if step.get("name") == step_name
+    )
+
+
+def test_a_work_guard_widened_with_an_event_check_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["if"] = (
+        "needs.changes.outputs.code == 'true' && github.event_name == 'push'"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-fast")
+
+
+def test_a_gated_job_stripped_to_its_sentinel_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    mutated["pytest-fast"]["steps"] = [
+        step
+        for step in mutated["pytest-fast"]["steps"]
+        if (step.get("name") or "").startswith(SKIP_SENTINEL_PREFIX)
+    ]
+
+    with pytest.raises(AssertionError):
+        test_a_gated_job_still_runs_its_test_command(mutated, "pytest-fast")
+
+
+def test_an_and_chained_output_expression_is_rejected(jobs: dict) -> None:
+    """`&&` binds tighter than `||`, so this skips CI on every ordinary PR."""
+    mutated = _mutated(jobs)
+    mutated["changes"]["outputs"]["code"] = (
+        _normalise(mutated["changes"]["outputs"]["code"])
+        .replace("== null ||", "== null &&")
+        .replace("> 3000 ||", "> 3000 &&")
+    )
+
+    test_non_pull_request_events_never_filter(mutated)
+    test_a_truncated_file_list_runs_everything(mutated)
+
+    with pytest.raises(AssertionError):
+        test_the_changes_outputs_are_exactly_as_declared(mutated)

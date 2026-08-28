@@ -99,6 +99,10 @@ jobs:
               # `packages`/`artifacts` config and asserts both the bundled
               # frontend and this module are inside it.
               - 'pyproject.toml'
+              # Hatchling honours .gitignore when it selects files -- the
+              # frontend_dist `artifacts` override exists because of it -- so an
+              # edit here can drop a tracked file from the wheel.
+              - '.gitignore'
               # pyproject's `readme` target, and root markdown is excluded from
               # `code` -- without this rule, renaming it skips the only job that
               # builds a wheel.
