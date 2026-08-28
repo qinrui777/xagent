@@ -77,7 +77,7 @@ _NoDuplicateKeyLoader.add_constructor(
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:
-    return yaml.load(CI_WORKFLOW.read_text(), Loader=_NoDuplicateKeyLoader)
+    return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=_NoDuplicateKeyLoader)
 
 
 @pytest.fixture(scope="module")
