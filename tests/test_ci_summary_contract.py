@@ -41,7 +41,7 @@ GATED_JOBS = {
 # Widening this set means docs-only pull requests stop running some part of the
 # suite. Changing it here as well as in the workflow is the point: it has to be
 # a deliberate act, not a one-line edit that reads as harmless in review.
-CODE_FILTER_EXCLUDES = {"!docs/**", "!assets/**", "!*.md"}
+CODE_FILTER_EXCLUDES = frozenset({"!docs/**", "!assets/**", "!*.md"})
 
 # This action decides whether the test suite runs at all, so it is pinned by
 # commit. Bumping it must be deliberate -- update this constant in the same
