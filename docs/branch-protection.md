@@ -239,24 +239,38 @@ The detector has a blind spot in the same family. `paths-filter` reads the chang
 
 The `frontend` filter names `README.md` for a related reason: `pyproject.toml` declares it as the project `readme`, root markdown is excluded from `code`, and `frontend-build` owns the only `python -m build --wheel` in the workflow. Without that rule a pull request that renames or deletes the README skips the one job that would notice hatchling can no longer resolve it.
 
+`code` excludes `frontend/src/**` and not `frontend/**`, which looks timid but is the widest exclusion that is actually safe: `tests/test_docker_workflow_versions.py` reads `frontend/package.json` and `tests/templates/test_manager.py` reads `frontend/public`, and `paths-filter` cannot express "exclude the directory but keep those two" -- once a pattern excludes a file, no later pattern includes it back. So a frontend-source-only pull request skips the Python lanes, while a `package.json` or asset change still runs them.
 
 `tests/test_ci_summary_contract.py` holds all of the above as tests: that
 `needs` and `check_job` name the same set of jobs, that no gathered job carries
-a condition beyond the draft guard, that every step of a gated job is guarded,
-that both outputs fall back to running everything on a truncated or missing file
-count, that the `frontend` filter still covers whatever `pyproject` points
-`readme` at, and that the paths-filter action stays pinned to its reviewed
-commit. Each of those assertions was confirmed to fail against a deliberately
-broken workflow before being committed.
+a condition beyond the draft guard, that both outputs fall back to running
+everything on a truncated or missing file count, that the `frontend` filter still
+covers whatever `pyproject` points `readme` at, and that the paths-filter action
+stays pinned to its reviewed commit.
+
+Two of those assertions are narrower than they first look, because the obvious
+version of each passes while still being bypassable. A step guard is checked for
+*polarity*, not merely for naming the output: work steps must lead with
+`== 'true'` and may only add `&&` conjunctions, and the single `Skip` sentinel
+must be exactly `!= 'true'`. Inverting a work guard would otherwise skip the real
+tests on exactly the pull requests that need them, with the job still green. The
+pin is asserted on the step carrying `id: filter`, and `paths-filter` must appear
+in the job exactly once -- searching the job for the SHA would also accept a dead
+pinned step sitting beside a real gate on a mutable tag.
+
+Each of these assertions was confirmed to fail against a deliberately broken
+workflow before being committed.
 
 ### Two contract tests own ci.yml
 
 `ci.yml` is guarded from both sides, and a change to it usually has to update both:
 
 - `tests/test_ci_summary_contract.py` (runs in `pytest-fast-deepdoc`) checks the properties above structurally, over the parsed YAML.
-- `frontend/src/ci/frontend-test-manifest.test.ts` (runs in `frontend-build`) freezes two regions by *exact text*: the `Check required jobs` script, whose non-comment lines must match a hard-coded list element for element, and the six required `frontend-build` test steps. It also executes the summary script under `bash` to prove failures propagate, so keep the `${{ needs.* }}` interpolations inline in `run:` -- moving them to `env:` leaves that execution with unset variables and silently guts the check.
+- `frontend/src/ci/frontend-test-manifest.test.ts` (runs in `frontend-build`) freezes exactly one region by *exact text*: the `Check required jobs` script, whose non-comment lines must match a hard-coded list element for element. It also executes that script under `bash` to prove failures propagate, so keep the `${{ needs.* }}` interpolations inline in `run:` -- moving them to `env:` leaves that execution with unset variables and silently guts the check.
 
-The frontend test rejects any `if:` on those six steps, because a condition there could quietly disable a required test. The path-filter gate is allowlisted by exact value (`frontendGateCondition`) and nothing else is, so the original rule still holds: no *arbitrary* condition can turn a required frontend step off.
+The six required `frontend-build` test steps are *not* frozen by text. They are checked semantically, over the parsed YAML: each `npm run` command must appear in exactly one step, with `working-directory: ./frontend`, no `continue-on-error`, a bash-compatible shell, and an `if:` that is either absent or exactly `needs.changes.outputs.frontend == 'true'`. Renaming a step, reordering it, or rewriting its key layout is therefore free; changing what it runs or how it is guarded is not. The gate is allowlisted by exact value and nothing else is, so the rule it protects still holds: no *arbitrary* condition can turn a required frontend step off.
+
+That file also pins both `jobs.changes` filter rule sets, which is a deliberate overlap rather than duplication. Each contract test runs inside a job gated by the very outputs it validates, so on its own each can be made to self-skip: excluding `.github/**` from `code` skips the Python contract, and the frontend contract is what then still objects. The reverse case -- dropping `.github/workflows/ci.yml` from the `frontend` filter as well -- skips both, and only the merge queue's unfiltered run catches it.
 
 This is also why `CI Summary` had to become required at all: before it did, only
 the migration checks gated, and a PR with red `pytest`, `e2e` or `pre-commit`

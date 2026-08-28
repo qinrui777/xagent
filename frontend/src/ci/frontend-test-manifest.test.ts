@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { isMap, isScalar, isSeq, parseDocument } from "yaml"
+import { isMap, isScalar, isSeq, parse, parseDocument } from "yaml"
 import type { Node } from "yaml"
 import { describe, expect, it, vi } from "vitest"
 import vitestConfig from "../../vitest.config"
@@ -78,6 +78,17 @@ const requiredFrontendSteps = [
   { command: "npm run test:app-pages", requiresExplicitBash: false },
   { command: "npm run test:home-build-contracts", requiresExplicitBash: false },
 ] as const
+// Pinned here as well as in the Python contract on purpose: each suite runs in
+// a job gated by these very outputs, so excluding `.github/**` from `code` would
+// skip the Python one and leave nothing asserting them (PR #1848 review).
+const codeFilterRules = ["**", "!docs/**", "!assets/**", "!*.md", "!frontend/src/**"]
+const frontendFilterRules = [
+  "frontend/**",
+  "pyproject.toml",
+  "README.md",
+  "src/xagent/web/__main__.py",
+  ".github/workflows/ci.yml",
+]
 const moduleDir = path.dirname(fileURLToPath(import.meta.url))
 const packageJsonPath = path.resolve(moduleDir, "../../package.json")
 const workflowPath = path.resolve(moduleDir, "../../../.github/workflows/ci.yml")
@@ -372,12 +383,58 @@ function assertCiSummaryContract(jobs: Record<string, unknown>) {
   assertCiSummaryFailurePropagation(run)
 }
 
+function assertChangeFilterContract(jobs: Record<string, unknown>) {
+  const changes = jobs.changes
+  requireRecord(changes, "jobs.changes")
+  if (!Array.isArray(changes.steps)) {
+    throw new Error("jobs.changes.steps must be an array")
+  }
+
+  const filterSteps = changes.steps.filter((step) => {
+    requireRecord(step, "jobs.changes.steps entry")
+    return step.id === "filter"
+  })
+  if (filterSteps.length !== 1) {
+    throw new Error(
+      `jobs.changes must declare exactly one step with id: filter; found ${filterSteps.length}`,
+    )
+  }
+
+  const step = filterSteps[0]!
+  requireRecord(step, "jobs.changes filter step")
+  requireRecord(step.with, "jobs.changes filter step with")
+  if (typeof step.with.filters !== "string") {
+    throw new Error("jobs.changes filter step must declare filters as a string")
+  }
+
+  const filters = parse(step.with.filters)
+  requireRecord(filters, "jobs.changes filters")
+  const expectations = [
+    ["code", codeFilterRules],
+    ["frontend", frontendFilterRules],
+  ] as const
+
+  for (const [name, expected] of expectations) {
+    const actual = filters[name]
+    if (
+      !Array.isArray(actual) ||
+      actual.length !== expected.length ||
+      actual.some((rule, index) => rule !== expected[index])
+    ) {
+      throw new Error(
+        `jobs.changes filters.${name} must be exactly ${JSON.stringify(expected)}; found ${JSON.stringify(actual)}`,
+      )
+    }
+  }
+}
+
 function assertSemanticWorkflowManifest(source: string) {
   const document = parseWorkflowDocument(source)
   const workflow = document.toJS({ maxAliasCount: 100 })
   requireRecord(workflow, "workflow root")
   assertWorkflowTriggerContract(workflow)
   requireRecord(workflow.jobs, "jobs")
+  assertChangeFilterContract(workflow.jobs)
   assertCiSummaryContract(workflow.jobs)
   const frontendBuild = workflow.jobs["frontend-build"]
   requireRecord(frontendBuild, "jobs.frontend-build")
@@ -416,7 +473,9 @@ function assertSemanticWorkflowManifest(source: string) {
       throw new Error(`${requiredStep.command} must use ./frontend`)
     }
     if (step.if !== undefined && step.if !== frontendGateCondition) {
-      throw new Error(`${requiredStep.command} must not set if`)
+      throw new Error(
+        `${requiredStep.command} if must be absent or exactly "${frontendGateCondition}"; found "${String(step.if)}"`,
+      )
     }
     if (step["continue-on-error"] !== undefined) {
       throw new Error(`${requiredStep.command} must not set continue-on-error`)
@@ -475,6 +534,58 @@ describe("frontend CI test manifest", () => {
 
     expect(() => assertSemanticWorkflowManifest(source)).toThrow(
       "workflow pull_request must not set paths or paths-ignore",
+    )
+  })
+
+  it("rejects excluding the workflow directory from the code filter", () => {
+    const source = replaceExactlyOnce(
+      realWorkflowSource,
+      "              - '!frontend/src/**'\n",
+      "              - '!frontend/src/**'\n              - '!.github/**'\n",
+      "code filter .github exclusion",
+    )
+
+    expect(() => assertSemanticWorkflowManifest(source)).toThrow(
+      "jobs.changes filters.code must be exactly",
+    )
+  })
+
+  it("rejects negating the frontend rule in the frontend filter", () => {
+    const source = replaceExactlyOnce(
+      realWorkflowSource,
+      "            frontend:\n              - 'frontend/**'\n",
+      "            frontend:\n              - '!frontend/**'\n",
+      "frontend filter negation",
+    )
+
+    expect(() => assertSemanticWorkflowManifest(source)).toThrow(
+      "jobs.changes filters.frontend must be exactly",
+    )
+  })
+
+  it("rejects dropping the readme from the frontend filter", () => {
+    const source = replaceExactlyOnce(
+      realWorkflowSource,
+      "              - 'README.md'\n",
+      "",
+      "frontend filter readme removal",
+    )
+
+    expect(() => assertSemanticWorkflowManifest(source)).toThrow(
+      "jobs.changes filters.frontend must be exactly",
+    )
+  })
+
+  it("rejects a changes job with no identified filter step", () => {
+    const source = replaceExactlyOnce(
+      realWorkflowSource,
+      "        id: filter\n",
+      "",
+      "filter step id removal",
+    )
+
+    expect(() => assertSemanticWorkflowManifest(source)).toThrow(
+      "jobs.changes must declare exactly one step with id: filter",
     )
   })
 
@@ -1025,7 +1136,7 @@ describe("frontend CI test manifest", () => {
 
     expect(source).toContain("        if: github.event_name == 'schedule'\n")
     expect(() => assertSemanticWorkflowManifest(source)).toThrow(
-      "npm run test:app-pages must not set if",
+      "npm run test:app-pages if must be absent or exactly",
     )
   })
 

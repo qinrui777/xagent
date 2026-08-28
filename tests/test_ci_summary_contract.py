@@ -31,6 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
+# The no-op step that keeps a gated job reporting success instead of skipping.
+# Matched by name, because it is the one step whose guard is legitimately inverted.
+SKIP_SENTINEL_PREFIX = "Skip"
+
 DRAFT_GUARD = (
     "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 )
@@ -48,7 +52,23 @@ GATED_JOBS = {
 # Widening this set means docs-only pull requests stop running some part of the
 # suite. Changing it here as well as in the workflow is the point: it has to be
 # a deliberate act, not a one-line edit that reads as harmless in review.
-CODE_FILTER_EXCLUDES = frozenset({"!docs/**", "!assets/**", "!*.md"})
+#
+# `!frontend/src/**` rather than `!frontend/**` because Python tests read
+# frontend/package.json and frontend/public, and paths-filter cannot re-include a
+# file an earlier pattern excluded. See docs/branch-protection.md.
+CODE_FILTER_EXCLUDES = frozenset(
+    {"!docs/**", "!assets/**", "!*.md", "!frontend/src/**"}
+)
+
+# The wheel-build inputs frontend-build owns. A rule dropped or negated here
+# stops the frontend lane running for changes that need it.
+FRONTEND_FILTER_RULES = (
+    "frontend/**",
+    "pyproject.toml",
+    "README.md",
+    "src/xagent/web/__main__.py",
+    ".github/workflows/ci.yml",
+)
 
 # This action decides whether the test suite runs at all, so it is pinned by
 # commit. Bumping it must be deliberate -- update this constant in the same
@@ -163,21 +183,46 @@ def test_summary_rejects_a_non_literal_changes_output(summary: dict) -> None:
 
 @pytest.mark.parametrize("job_name", sorted(GATED_JOBS))
 def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None:
-    """A step added without a guard silently costs a docs-only PR a full run."""
-    output = GATED_JOBS[job_name]
-    guard = f"needs.changes.outputs.{output}"
+    """Guards must have the right polarity, not merely name the output.
 
+    Referencing the output is not enough: flipping a work step to ``!= 'true'``
+    skips the real tests on exactly the pull requests that need them while the
+    job, and so the summary, stays green.
+    """
+    output = GATED_JOBS[job_name]
+    run_guard = f"needs.changes.outputs.{output} == 'true'"
+    skip_guard = f"needs.changes.outputs.{output} != 'true'"
+
+    sentinels = []
     for step in jobs[job_name]["steps"]:
         label = step.get("name") or step.get("uses") or "<unnamed>"
-        condition = step.get("if")
-        assert condition is not None, (
+        condition = _normalise(step.get("if") or "")
+        assert condition, (
             f"step '{label}' in job '{job_name}' has no condition; every step "
-            f"of a gated job must be guarded on {guard}"
+            f"of a gated job must be guarded on {run_guard}"
         )
-        assert guard in condition, (
+
+        if label.startswith(SKIP_SENTINEL_PREFIX):
+            sentinels.append(label)
+            assert condition == skip_guard, (
+                f"sentinel '{label}' in job '{job_name}' is conditional on "
+                f"{condition!r}; it must be exactly {skip_guard!r} so the job "
+                "reports success on a change it does not apply to"
+            )
+            continue
+
+        # Matrix and cache predicates are allowed, but only as further
+        # conjunctions -- the gate has to lead and cannot be OR-ed away.
+        assert condition == run_guard or condition.startswith(f"{run_guard} && "), (
             f"step '{label}' in job '{job_name}' is conditional on "
-            f"{condition!r}, which does not reference {guard}"
+            f"{condition!r}; a work step must start with {run_guard!r} and may "
+            "only add '&&' conjunctions"
         )
+
+    assert len(sentinels) == 1, (
+        f"job '{job_name}' must have exactly one '{SKIP_SENTINEL_PREFIX}...' "
+        f"sentinel step so it never reports an empty run; found {sentinels}"
+    )
 
 
 @pytest.mark.parametrize("job_name", sorted(GATED_JOBS))
@@ -201,10 +246,25 @@ def test_changes_job_can_read_the_pull_request(jobs: dict) -> None:
 
 
 def test_paths_filter_is_pinned_by_commit(jobs: dict) -> None:
-    uses = [step["uses"] for step in jobs["changes"]["steps"] if "uses" in step]
-    assert PATHS_FILTER_PIN in uses, (
-        f"expected {PATHS_FILTER_PIN}, found {uses}. Bumping the action is a "
-        "supply-chain decision: it gates whether the test suite runs at all."
+    """The pin has to bind to the step that produces the outputs.
+
+    Looking for the SHA anywhere in the job would also accept a dead pinned
+    step sitting beside a real gate that uses a mutable tag.
+    """
+    assert _filter_step(jobs)["uses"] == PATHS_FILTER_PIN, (
+        f"the 'filter' step must use exactly {PATHS_FILTER_PIN}, found "
+        f"{_filter_step(jobs)['uses']!r}. Bumping the action is a supply-chain "
+        "decision: it gates whether the test suite runs at all."
+    )
+
+    invocations = [
+        step["uses"]
+        for step in jobs["changes"]["steps"]
+        if "dorny/paths-filter" in step.get("uses", "")
+    ]
+    assert invocations == [PATHS_FILTER_PIN], (
+        "the changes job must invoke paths-filter exactly once, pinned; found "
+        f"{invocations}"
     )
 
 
@@ -227,6 +287,29 @@ def test_code_filter_exclusions_are_exactly_as_declared(jobs: dict) -> None:
     # Without this quantifier the exclusions above do not mean what they read
     # as -- the default `some` does not combine includes with excludes.
     assert step["with"]["predicate-quantifier"] == "some-with-excludes"
+
+
+def test_frontend_filter_rules_are_exactly_as_declared(jobs: dict) -> None:
+    """Nothing else owns these rules.
+
+    The frontend manifest contract inspects frontend-build and the summary, but
+    never `jobs.changes`, so without this a dropped or negated rule passes both
+    suites and only shows up as a frontend lane that quietly stopped running.
+    """
+    filters = yaml.safe_load(_filter_step(jobs)["with"]["filters"])
+
+    assert tuple(filters["frontend"]) == FRONTEND_FILTER_RULES, (
+        "the frontend filter rules changed; anything removed here stops the "
+        f"frontend lane running for that path. expected "
+        f"{list(FRONTEND_FILTER_RULES)}, found {filters['frontend']}"
+    )
+
+    negated = [rule for rule in filters["frontend"] if rule.startswith("!")]
+    assert not negated, (
+        f"the frontend filter must not exclude anything; found {negated}. An "
+        "exclusion cannot be undone by a later rule, so it silently narrows the "
+        "lane."
+    )
 
 
 def test_non_pull_request_events_never_filter(jobs: dict) -> None:

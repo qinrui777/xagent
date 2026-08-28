@@ -89,6 +89,10 @@ jobs:
               # Root-level markdown only. src/xagent/skills/**/SKILL.md is input
               # to tests/skills and to the read_skill_doc tool, so it is code.
               - '!*.md'
+              # Only the source tree, not all of `frontend/`: two Python tests
+              # read frontend/package.json and frontend/public, and paths-filter
+              # cannot re-include a file a pattern has already excluded.
+              - '!frontend/src/**'
             frontend:
               - 'frontend/**'
               # The last step of frontend-build builds a wheel from the hatch
