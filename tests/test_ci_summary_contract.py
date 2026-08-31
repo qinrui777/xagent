@@ -71,7 +71,10 @@ FRONTEND_FILTER_RULES = (
     # wheel, so an edit there can silently drop one.
     ".gitignore",
     "README.md",
-    "src/xagent/web/__main__.py",
+    # The whole package tree, not just the entrypoint: hatchling packages all
+    # of src/xagent and drops any file .gitignore matches, so a backend-only
+    # change can break the wheel (PR #1848 review).
+    "src/xagent/**",
     ".github/workflows/ci.yml",
 )
 

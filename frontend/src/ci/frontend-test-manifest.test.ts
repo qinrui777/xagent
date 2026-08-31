@@ -87,7 +87,7 @@ const frontendFilterRules = [
   "pyproject.toml",
   ".gitignore",
   "README.md",
-  "src/xagent/web/__main__.py",
+  "src/xagent/**",
   ".github/workflows/ci.yml",
 ]
 const moduleDir = path.dirname(fileURLToPath(import.meta.url))

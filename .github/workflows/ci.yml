@@ -97,7 +97,7 @@ jobs:
               - 'frontend/**'
               # The last step of frontend-build builds a wheel from the hatch
               # `packages`/`artifacts` config and asserts both the bundled
-              # frontend and this module are inside it.
+              # frontend and the Python package are inside it.
               - 'pyproject.toml'
               # Hatchling honours .gitignore when it selects files -- the
               # frontend_dist `artifacts` override exists because of it -- so an
@@ -107,7 +107,11 @@ jobs:
               # `code` -- without this rule, renaming it skips the only job that
               # builds a wheel.
               - 'README.md'
-              - 'src/xagent/web/__main__.py'
+              # The whole package tree, not just the entrypoint: hatchling
+              # packages all of src/xagent and drops any file .gitignore
+              # matches, so a backend-only change can break the wheel while
+              # never touching a rule above (PR #1848 review).
+              - 'src/xagent/**'
               - '.github/workflows/ci.yml'
 
   prepare-deepdoc-cache:
