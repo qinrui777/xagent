@@ -79,9 +79,10 @@ const requiredFrontendSteps = [
   { command: "npm run test:app-pages", requiresExplicitBash: false },
   { command: "npm run test:home-build-contracts", requiresExplicitBash: false },
 ] as const
-// Pinned here as well as in the Python contract on purpose: each suite runs in
-// a job gated by these very outputs, so excluding `.github/**` from `code` would
-// skip the Python one and leave nothing asserting them (PR #1848 review).
+// Pinned here as well as in the Python contract on purpose. That suite's
+// load-bearing run is the ungated `pre-commit` job; this one is still
+// `frontend`-gated, so it is what objects when a filter edit skips the frontend
+// lane (PR #1848 review).
 const codeFilterRules = ["**", "!docs/**", "!assets/**", "!*.md", "!frontend/src/**"]
 const frontendFilterRules = [
   "frontend/**",

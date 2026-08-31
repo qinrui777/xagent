@@ -103,17 +103,25 @@ GATED_JOB_WORK_STEPS = {
     "e2e": ("Run e2e tests", "python -m pytest"),
 }
 
-# A work step may narrow itself to one matrix leg. The leg is captured rather
-# than waved through: a name the job does not declare -- or any name at all on a
-# job with no matrix -- is false on every leg, so the step never runs.
-MATRIX_CONJUNCT = re.compile(r"^\(matrix\.name == '([a-z0-9-]+)'\)$")
+_CACHE_HIT = "(needs.prepare-deepdoc-cache.outputs.cache-hit == 'true')"
+_CACHE_MISS = "(needs.prepare-deepdoc-cache.outputs.cache-hit != 'true')"
 
-# The other conjunctions a work step's gate may carry. Checking merely that the
-# condition *starts with* the gate also accepts `&& github.event_name == 'push'`,
-# which skips the step on every pull request while the job still reports success.
-WORK_GUARD_CONJUNCTS = (
-    re.compile(r"^\(needs\.prepare-deepdoc-cache\.outputs\.cache-hit [!=]= 'true'\)$"),
-)
+# Every step whose gate may carry more than the `changes` output, and the exact
+# extra it carries. Keyed by (job, step), not allowlisted globally: each of these
+# predicates is false on some reachable run, so one that is right on a setup step
+# silently skips a workload step (PR #1848 review).
+STEP_GUARD_EXTRAS = {
+    ("pytest-fast", "Pre-pull the sandbox image"): "(matrix.name == 'web')",
+    ("pytest-fast-deepdoc", "Pre-pull the sandbox image"): "(matrix.name == 'core')",
+    ("pytest-fast-deepdoc", "Restore Deepdoc cache"): _CACHE_HIT,
+    ("pytest-fast-deepdoc", "Download Deepdoc cache artifact"): _CACHE_MISS,
+    ("pytest-slow", "Restore Deepdoc cache"): _CACHE_HIT,
+    ("pytest-slow", "Download Deepdoc cache artifact"): _CACHE_MISS,
+}
+
+# Applied to the value above, not to the workflow: renaming a leg in `strategy`
+# alone leaves a guard that is false on every leg.
+MATRIX_CONJUNCT = re.compile(r"^\(matrix\.name == '([a-z0-9-]+)'\)$")
 
 
 class _NoDuplicateKeyLoader(yaml.SafeLoader):
@@ -263,25 +271,24 @@ def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None
         )
 
         remainder = condition[len(run_guard) :].removeprefix(" && ")
-        for conjunct in filter(None, remainder.split(" && ")):
-            leg = MATRIX_CONJUNCT.match(conjunct)
-            if leg:
-                declared = _matrix_leg_names(jobs[job_name])
-                assert leg.group(1) in declared, (
-                    f"step '{label}' in job '{job_name}' narrows itself to "
-                    f"matrix leg {leg.group(1)!r}, but the job declares "
-                    f"{declared or 'no matrix at all'}. The predicate is false "
-                    "on every leg, so the step never runs while the job still "
-                    "reports success."
-                )
-                continue
+        expected = STEP_GUARD_EXTRAS.get((job_name, label), "")
+        assert remainder == expected, (
+            f"step '{label}' in job '{job_name}' is gated on "
+            f"{run_guard!r} && {remainder!r}, but the only extra this step may "
+            f"carry is {expected!r}. Every permitted predicate is false on some "
+            "reachable run, so one on the wrong step skips it there while the "
+            "job still reports success."
+        )
 
-            assert any(p.match(conjunct) for p in WORK_GUARD_CONJUNCTS), (
-                f"step '{label}' in job '{job_name}' adds the conjunct "
-                f"{conjunct!r} to its gate, which is not one of the matrix or "
-                "cache predicates a work step may narrow itself with. A "
-                "conjunct on the event or the pull request skips the step on "
-                "every pull request while the job still reports success."
+        leg = MATRIX_CONJUNCT.match(expected)
+        if leg:
+            declared = _matrix_leg_names(jobs[job_name])
+            assert leg.group(1) in declared, (
+                f"step '{label}' in job '{job_name}' narrows itself to matrix "
+                f"leg {leg.group(1)!r}, but the job declares "
+                f"{declared or 'no matrix at all'}. The predicate is false on "
+                "every leg, so the step never runs while the job still reports "
+                "success."
             )
 
     assert len(sentinels) == 1, (
@@ -290,14 +297,83 @@ def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None
     )
 
 
-def _executable_text(script: str) -> str:
-    """`run:` text with quoted literals and comments removed.
+# Words that open or close a compound statement, and their effect on nesting.
+# `if false; then <workload>; fi` is not proof that the workload runs.
+_BLOCK_WORDS = {
+    "if": 1,
+    "while": 1,
+    "until": 1,
+    "for": 1,
+    "case": 1,
+    "select": 1,
+    "{": 1,
+    "fi": -1,
+    "done": -1,
+    "esac": -1,
+    "}": -1,
+    "then": 0,
+    "else": 0,
+    "elif": 0,
+    "do": 0,
+    "in": 0,
+    "(": 0,
+    ")": 0,
+}
 
-    Raw shell accepts `echo \'python -m pytest\'` or a commented-out line as
-    proof the workload survives; neither executes anything.
+_SEPARATOR = re.compile(r"\|\||&&|[;\n|&]")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# The one wrapper a workload is legitimately launched through, so the check
+# cannot be satisfied by another command that merely mentions pytest.
+WORKLOAD_RUNNER_PREFIXES = ("python3 -m uv run ",)
+
+
+def _top_level_commands(script: str) -> list[str]:
+    """The commands a `run:` script reaches unconditionally, in command position.
+
+    Substring membership is not execution: `echo python -m pytest`,
+    `if false; then python -m pytest; fi`, `true || python -m pytest` and a
+    function body that is never called all contain the workload and none of them
+    runs it. So quoted literals and comments go first, then a command counts only
+    at nesting depth zero and only from the start of a command.
+
+    This is a command-shape contract, not a shell parser: it models nesting,
+    command position and `||`, and deliberately accepts the right-hand side of
+    `&&`, which the leading `set -e` already makes load-bearing in these steps.
     """
-    stripped = re.sub(r"\'[^\']*\'|\"[^\"]*\"", "", script)
-    return re.sub(r"#[^\n]*", "", stripped)
+    text = re.sub(r"'[^']*'|\"[^\"]*\"", "", script)
+    text = re.sub(r"#[^\n]*", "", text)
+    text = re.sub(r"\\\n", " ", text)
+
+    commands: list[str] = []
+    depth = 0
+    preceded_by = ""
+    cursor = 0
+    for match in [*_SEPARATOR.finditer(text), None]:
+        segment = text[cursor : match.start()] if match else text[cursor:]
+        words = segment.split()
+        while words and words[0] in _BLOCK_WORDS:
+            depth = max(depth + _BLOCK_WORDS[words.pop(0)], 0)
+        if words and words[-1] == "{":
+            # `run_tests() { ... }` defines the workload, it does not call it.
+            depth += 1
+            words.pop()
+        if words and depth == 0 and preceded_by != "||":
+            commands.append(" ".join(words))
+        if match:
+            preceded_by = match.group(0)
+            cursor = match.end()
+    return commands
+
+
+def _invokes(segment: str, command: str) -> bool:
+    words = segment.split()
+    while words and _ASSIGNMENT.match(words[0]):
+        words.pop(0)
+    text = " ".join(words)
+    for prefix in WORKLOAD_RUNNER_PREFIXES:
+        text = text.removeprefix(prefix)
+    return text == command or text.startswith(f"{command} ")
 
 
 @pytest.mark.parametrize("job_name", sorted(GATED_JOB_WORK_STEPS))
@@ -312,10 +388,12 @@ def test_a_gated_job_still_runs_its_test_command(jobs: dict, job_name: str) -> N
         f"job '{job_name}' must have exactly one '{step_name}' step, the one it "
         f"exists to run; found {len(matching)}"
     )
-    assert command in _executable_text(matching[0].get("run") or ""), (
-        f"step '{step_name}' in job '{job_name}' does not execute {command!r}. "
-        "Every step of a gated job is skippable by design, so without this the "
-        "job reports success having executed no tests at all."
+    commands = _top_level_commands(matching[0].get("run") or "")
+    assert any(_invokes(c, command) for c in commands), (
+        f"step '{step_name}' in job '{job_name}' never reaches {command!r} in "
+        f"command position; the commands it does run are {commands}. Every step "
+        "of a gated job is skippable by design, so without this the job reports "
+        "success having executed no tests at all."
     )
 
 
@@ -386,9 +464,9 @@ def test_code_filter_exclusions_are_exactly_as_declared(jobs: dict) -> None:
 def test_frontend_filter_rules_are_exactly_as_declared(jobs: dict) -> None:
     """Both suites pin these rules, which is overlap rather than duplication.
 
-    Each runs behind an output it validates, so either can be made to self-skip;
-    the other is what still objects. Dropping or negating a rule has to get past
-    both.
+    This suite's load-bearing run is the ungated `pre-commit` job, so no filter
+    edit can skip it; the frontend suite is still `frontend`-gated. Dropping or
+    negating a rule has to get past both.
     """
     filters = yaml.safe_load(_filter_step(jobs)["with"]["filters"])
 
@@ -614,13 +692,14 @@ def test_a_workload_replaced_with_an_echo_decoy_is_rejected(jobs: dict) -> None:
         test_a_gated_job_still_runs_its_test_command(mutated, "pytest-fast")
 
 
-def test_a_guard_naming_a_matrix_leg_that_does_not_exist_is_rejected(
+def test_a_matrix_leg_renamed_out_from_under_a_guard_is_rejected(
     jobs: dict,
 ) -> None:
+    """The rename is on the `strategy` side; the guard still names the old leg."""
     mutated = _mutated(jobs)
-    _step(mutated, "pytest-fast", "Run tests")["if"] = (
-        "needs.changes.outputs.code == 'true' && (matrix.name == 'never')"
-    )
+    for leg in mutated["pytest-fast"]["strategy"]["matrix"]["include"]:
+        if leg["name"] == "web":
+            leg["name"] = "webapp"
 
     with pytest.raises(AssertionError):
         test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-fast")
@@ -645,3 +724,56 @@ def test_a_wheel_member_outside_the_frontend_filter_is_rejected(jobs: dict) -> N
 
     with pytest.raises(AssertionError):
         test_wheel_members_are_covered_by_the_frontend_filter(mutated)
+
+
+def test_an_unquoted_echo_decoy_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["run"] = (
+        "set -e\necho python -m pytest tests\n"
+    )
+
+    with pytest.raises(AssertionError):
+        test_a_gated_job_still_runs_its_test_command(mutated, "pytest-fast")
+
+
+def test_a_workload_in_an_unreachable_branch_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["run"] = (
+        "set -e\nif false; then python3 -m uv run python -m pytest; fi\n"
+    )
+
+    with pytest.raises(AssertionError):
+        test_a_gated_job_still_runs_its_test_command(mutated, "pytest-fast")
+
+
+def test_a_declared_matrix_leg_is_rejected_on_a_workload_step(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["if"] = (
+        "needs.changes.outputs.code == 'true' && (matrix.name == 'web')"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-fast")
+
+
+def test_a_cache_predicate_is_rejected_on_a_workload_step(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-slow", "Run slow tests")["if"] = (
+        "needs.changes.outputs.code == 'true' && "
+        "(needs.prepare-deepdoc-cache.outputs.cache-hit != 'true')"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-slow")
+
+
+def test_a_pre_pull_leg_swapped_for_another_declared_leg_is_rejected(
+    jobs: dict,
+) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Pre-pull the sandbox image")["if"] = (
+        "needs.changes.outputs.code == 'true' && (matrix.name == 'integration')"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-fast")
