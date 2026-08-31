@@ -53,8 +53,9 @@ const ciSummaryFailurePropagationCommands = [
   'check_job "pytest-slow" "${{ needs[\'pytest-slow\'].result }}"',
   'check_job "e2e" "${{ needs.e2e.result }}"',
   frontendSummaryCheckCommand,
-  // A gated job whose flag is empty skips every step and still reports success,
-  // so the summary rejects anything but a literal true/false.
+  // An empty flag skips every work step and leaves only the Skip sentinel, so
+  // the job still reports success; the summary rejects anything but a literal
+  // true/false.
   "check_flag() {",
   'local name="$1"',
   'local value="$2"',

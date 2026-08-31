@@ -317,6 +317,13 @@ jobs:
         env:
           PRE_COMMIT_USE_SYSTEM: true
 
+      # Not only in the pytest-fast-deepdoc `core` leg: this is the one job
+      # CI Summary gathers that no `changes` output can gate, and a suite
+      # validating those outputs must not be skippable by them.
+      - name: Run CI contract tests
+        shell: bash
+        run: python3 -m uv run python -m pytest tests/test_ci_summary_contract.py -q
+
   pytest-fast:
     name: Pytest Fast (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -931,12 +938,9 @@ jobs:
           check_job "e2e" "${{ needs.e2e.result }}"
           check_job "frontend-build" "${{ needs['frontend-build'].result }}"
 
-          # The jobs above are gated at the step level, so an empty outputs
-          # value would skip every step while the job still reports success --
-          # a green summary with nothing having run. That is the one way this
-          # summary can pass vacuously, so reject anything but a literal
-          # true/false here rather than trusting the expression that produces
-          # it.
+          # On an empty outputs value every guarded work step skips, only
+          # the Skip sentinel runs, and the job reports success -- so the
+          # results above cannot tell that nothing ran. This is what fails.
           check_flag() {
             local name="$1"
             local value="$2"

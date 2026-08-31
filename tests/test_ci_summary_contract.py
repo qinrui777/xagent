@@ -13,9 +13,10 @@ something that fails. See that document's "Required contexts must be summary
 jobs" and "Gate at the step, not at the job" sections for the reasoning.
 
 ``ci.yml`` has a second contract test, ``frontend/src/ci/frontend-test-manifest.test.ts``.
-It freezes the summary script by exact text, and checks the six required
-frontend-build steps semantically -- command, working directory, shell, and an
-``if:`` that is either absent or exactly the path-filter gate. A change to either
+It freezes the summary script by exact text, pins both ``jobs.changes`` filter
+rule sets, and checks the six required frontend-build steps semantically --
+command, working directory, shell, and an ``if:`` that is either absent or
+exactly the path-filter gate. A change to either
 region has to update both files or CI fails in the frontend lane.
 """
 
@@ -32,6 +33,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+
+# This suite validates the `changes` outputs, so a job gated on them cannot be
+# the only place it runs.
+CONTRACT_TEST_PATH = "tests/test_ci_summary_contract.py"
 
 # The no-op step that keeps a gated job reporting success instead of skipping.
 # Matched by name, because it is the one step whose guard is legitimately inverted.
@@ -87,21 +92,26 @@ PATHS_FILTER_PIN = "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
 # not compare the rows it received against the pull request's changed_files.
 LIST_FILES_MAX = 3000
 
-# The command each gated job exists to run. Correct guards still describe a job
-# whose real steps were deleted, which runs nothing and reports success.
-# frontend-build is absent: the TS contract pins its steps by exact command.
-GATED_JOB_WORK_COMMANDS = {
-    "pytest-fast": "python -m pytest",
-    "pytest-fast-deepdoc": "python -m pytest",
-    "pytest-slow": "python -m pytest",
-    "e2e": "python -m pytest",
+# The step each gated job exists to run, and the command it must execute. Named
+# rather than searched: a substring scan over every step's text lets a decoy in
+# the sentinel stand in for a deleted workload. frontend-build is absent -- the
+# TS contract pins its steps by exact command.
+GATED_JOB_WORK_STEPS = {
+    "pytest-fast": ("Run tests", "python -m pytest"),
+    "pytest-fast-deepdoc": ("Run tests", "python -m pytest"),
+    "pytest-slow": ("Run slow tests", "python -m pytest"),
+    "e2e": ("Run e2e tests", "python -m pytest"),
 }
 
-# The only conjunctions a work step's gate may carry. Checking merely that the
+# A work step may narrow itself to one matrix leg. The leg is captured rather
+# than waved through: a name the job does not declare -- or any name at all on a
+# job with no matrix -- is false on every leg, so the step never runs.
+MATRIX_CONJUNCT = re.compile(r"^\(matrix\.name == '([a-z0-9-]+)'\)$")
+
+# The other conjunctions a work step's gate may carry. Checking merely that the
 # condition *starts with* the gate also accepts `&& github.event_name == 'push'`,
 # which skips the step on every pull request while the job still reports success.
 WORK_GUARD_CONJUNCTS = (
-    re.compile(r"^\(matrix\.name == '[a-z0-9-]+'\)$"),
     re.compile(r"^\(needs\.prepare-deepdoc-cache\.outputs\.cache-hit [!=]= 'true'\)$"),
 )
 
@@ -153,6 +163,11 @@ def _filter_step(jobs: dict) -> dict:
     return next(step for step in jobs["changes"]["steps"] if step.get("id") == "filter")
 
 
+def _matrix_leg_names(job: dict) -> list[str]:
+    include = (job.get("strategy") or {}).get("matrix", {}).get("include") or []
+    return [leg["name"] for leg in include if "name" in leg]
+
+
 def _normalise(expression: str) -> str:
     return re.sub(r"\s+", " ", expression).strip()
 
@@ -198,7 +213,10 @@ def test_gathered_jobs_are_never_skipped(summary: dict, jobs: dict) -> None:
 
 
 def test_summary_rejects_a_non_literal_changes_output(summary: dict) -> None:
-    """Empty outputs would skip every gated step while the job stays green."""
+    """An empty output leaves only the sentinel running, and the job goes green.
+
+    `check_job` cannot see that, so the summary has to reject the value itself.
+    """
     script = summary["steps"][0]["run"]
     checked = set(re.findall(r'check_flag "([^"]+)"', script))
     assert checked == set(GATED_JOBS.values()), (
@@ -246,6 +264,18 @@ def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None
 
         remainder = condition[len(run_guard) :].removeprefix(" && ")
         for conjunct in filter(None, remainder.split(" && ")):
+            leg = MATRIX_CONJUNCT.match(conjunct)
+            if leg:
+                declared = _matrix_leg_names(jobs[job_name])
+                assert leg.group(1) in declared, (
+                    f"step '{label}' in job '{job_name}' narrows itself to "
+                    f"matrix leg {leg.group(1)!r}, but the job declares "
+                    f"{declared or 'no matrix at all'}. The predicate is false "
+                    "on every leg, so the step never runs while the job still "
+                    "reports success."
+                )
+                continue
+
             assert any(p.match(conjunct) for p in WORK_GUARD_CONJUNCTS), (
                 f"step '{label}' in job '{job_name}' adds the conjunct "
                 f"{conjunct!r} to its gate, which is not one of the matrix or "
@@ -260,18 +290,32 @@ def test_every_step_of_a_gated_job_is_guarded(jobs: dict, job_name: str) -> None
     )
 
 
-@pytest.mark.parametrize("job_name", sorted(GATED_JOB_WORK_COMMANDS))
+def _executable_text(script: str) -> str:
+    """`run:` text with quoted literals and comments removed.
+
+    Raw shell accepts `echo \'python -m pytest\'` or a commented-out line as
+    proof the workload survives; neither executes anything.
+    """
+    stripped = re.sub(r"\'[^\']*\'|\"[^\"]*\"", "", script)
+    return re.sub(r"#[^\n]*", "", stripped)
+
+
+@pytest.mark.parametrize("job_name", sorted(GATED_JOB_WORK_STEPS))
 def test_a_gated_job_still_runs_its_test_command(jobs: dict, job_name: str) -> None:
     """A correctly guarded job that no longer runs anything is still green."""
-    command = GATED_JOB_WORK_COMMANDS[job_name]
-    running = [
-        step for step in jobs[job_name]["steps"] if command in (step.get("run") or "")
+    step_name, command = GATED_JOB_WORK_STEPS[job_name]
+    matching = [
+        step for step in jobs[job_name]["steps"] if step.get("name") == step_name
     ]
 
-    assert running, (
-        f"job '{job_name}' has no step running {command!r}. Every step of a "
-        "gated job is skippable by design, so without this the job reports "
-        "success having executed no tests at all."
+    assert len(matching) == 1, (
+        f"job '{job_name}' must have exactly one '{step_name}' step, the one it "
+        f"exists to run; found {len(matching)}"
+    )
+    assert command in _executable_text(matching[0].get("run") or ""), (
+        f"step '{step_name}' in job '{job_name}' does not execute {command!r}. "
+        "Every step of a gated job is skippable by design, so without this the "
+        "job reports success having executed no tests at all."
     )
 
 
@@ -340,11 +384,11 @@ def test_code_filter_exclusions_are_exactly_as_declared(jobs: dict) -> None:
 
 
 def test_frontend_filter_rules_are_exactly_as_declared(jobs: dict) -> None:
-    """Nothing else owns these rules.
+    """Both suites pin these rules, which is overlap rather than duplication.
 
-    The frontend manifest contract inspects frontend-build and the summary, but
-    never `jobs.changes`, so without this a dropped or negated rule passes both
-    suites and only shows up as a frontend lane that quietly stopped running.
+    Each runs behind an output it validates, so either can be made to self-skip;
+    the other is what still objects. Dropping or negating a rule has to get past
+    both.
     """
     filters = yaml.safe_load(_filter_step(jobs)["with"]["filters"])
 
@@ -442,6 +486,54 @@ def test_frontend_filter_covers_the_readme_the_wheel_needs(jobs: dict) -> None:
     )
 
 
+def _repo_path_for_wheel_member(member: str, packages: list[str]) -> str | None:
+    """Where a wheel member lives in the repository, per hatch's `packages`."""
+    head, _, rest = member.partition("/")
+    for package in packages:
+        if package.rsplit("/", 1)[-1] == head:
+            return f"{package}/{rest}" if rest else package
+    return None
+
+
+def _covered_by_filter(path: str, rules: list[str]) -> bool:
+    return any(
+        path.startswith(rule[:-2]) if rule.endswith("/**") else path == rule
+        for rule in rules
+    )
+
+
+def test_wheel_members_are_covered_by_the_frontend_filter(jobs: dict) -> None:
+    """The grep targets and the filter rules are literals in two namespaces.
+
+    The archive holds `xagent/...` while the filter names `src/xagent/...`, so
+    nothing textual links them and either side can be repointed alone. Hatch's
+    `packages` is the mapping, which makes the relationship assertable.
+    """
+    step = _step(jobs, "frontend-build", "Verify package bundles the frontend")
+    members = re.findall(r'grep -q "([^"]+)"', step["run"])
+    assert members, (
+        "the wheel step no longer asserts any package member is in the archive"
+    )
+
+    wheel = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["hatch"][
+        "build"
+    ]["targets"]["wheel"]
+    rules = yaml.safe_load(_filter_step(jobs)["with"]["filters"])["frontend"]
+
+    for member in members:
+        path = _repo_path_for_wheel_member(member, wheel["packages"])
+        assert path is not None, (
+            f"the wheel step asserts {member!r}, which is under none of hatch's "
+            f"packages {wheel['packages']}. Either the grep target or the "
+            "packaging config was repointed without the other."
+        )
+        assert _covered_by_filter(path, rules), (
+            f"the wheel step asserts {member!r}, which lives at {path!r}, but "
+            f"the frontend filter {rules} does not cover it. A change to that "
+            "file would skip the only job that inspects a built wheel."
+        )
+
+
 def _mutated(jobs: dict) -> dict:
     return copy.deepcopy(jobs)
 
@@ -488,3 +580,68 @@ def test_an_and_chained_output_expression_is_rejected(jobs: dict) -> None:
 
     with pytest.raises(AssertionError):
         test_the_changes_outputs_are_exactly_as_declared(mutated)
+
+
+def test_the_contract_runs_in_a_job_the_filter_cannot_gate(
+    jobs: dict, summary: dict
+) -> None:
+    """This suite is the thing that catches a neutered `changes` job.
+
+    Behind a gate it validates nothing: an output pinned to a literal `false`
+    skips the jobs, skips this suite with them, and `check_flag` accepts
+    `false` by design, so the summary stays green having run no tests at all.
+    """
+    ungated = [name for name in summary["needs"] if name not in GATED_JOBS]
+    running = [
+        name
+        for name in ungated
+        for step in jobs[name]["steps"]
+        if CONTRACT_TEST_PATH in (step.get("run") or "") and not step.get("if")
+    ]
+
+    assert running, (
+        f"no unconditional step in any of {sorted(ungated)} runs "
+        f"{CONTRACT_TEST_PATH}. Every job that does run it is gated on the "
+        "very outputs it exists to validate."
+    )
+
+
+def test_a_workload_replaced_with_an_echo_decoy_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["run"] = "echo 'python -m pytest'\n"
+
+    with pytest.raises(AssertionError):
+        test_a_gated_job_still_runs_its_test_command(mutated, "pytest-fast")
+
+
+def test_a_guard_naming_a_matrix_leg_that_does_not_exist_is_rejected(
+    jobs: dict,
+) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "pytest-fast", "Run tests")["if"] = (
+        "needs.changes.outputs.code == 'true' && (matrix.name == 'never')"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "pytest-fast")
+
+
+def test_a_matrix_guard_on_a_job_without_a_matrix_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    _step(mutated, "e2e", "Run e2e tests")["if"] = (
+        "needs.changes.outputs.code == 'true' && (matrix.name == 'web')"
+    )
+
+    with pytest.raises(AssertionError):
+        test_every_step_of_a_gated_job_is_guarded(mutated, "e2e")
+
+
+def test_a_wheel_member_outside_the_frontend_filter_is_rejected(jobs: dict) -> None:
+    mutated = _mutated(jobs)
+    step = _step(mutated, "frontend-build", "Verify package bundles the frontend")
+    step["run"] = step["run"].replace(
+        "xagent/web/__main__.py", "somewhere/else/__main__.py"
+    )
+
+    with pytest.raises(AssertionError):
+        test_wheel_members_are_covered_by_the_frontend_filter(mutated)

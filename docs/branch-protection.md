@@ -229,13 +229,7 @@ and `pytest-slow` wait on it first. Non-`pull_request` events --
 the queue re-runs the full suite against the tree that will actually land and
 stays the backstop for anything the filters get wrong.
 
-Step-level gating has a failure mode of its own that job-level gating does not:
-if the `changes` outputs come back empty, every step skips, the job reports
-`success`, and the summary goes green with nothing having run. A skipped job at
-least shows up grey in the UI; this one is green. `CI Summary` therefore also
-asserts that each output is a literal `true` or `false` and fails otherwise --
-that is the only way this summary can pass vacuously, so it is checked
-explicitly rather than trusted to the expression that produces it.
+Step-level gating has a failure mode of its own that job-level gating does not: if the `changes` outputs come back empty, every guarded work step skips, only the `Skip` sentinel runs, and the job reports `success` having tested nothing. A skipped job at least shows up grey in the UI; this one is green, and `check_job` cannot tell the difference. `CI Summary` therefore also asserts that each output is a literal `true` or `false` and fails on an empty one -- that is the only way this summary could otherwise pass vacuously, so it is checked explicitly rather than trusted to the expression that produces it.
 
 The detector has a blind spot in the same family. `paths-filter` reads the changed file list from `pulls.listFiles`, which returns at most 3000 files, and it never compares the rows it received against the pull request's own `changed_files` count -- so past that cutoff it can report a perfectly genuine `false` while code sits in the part it could not see. Both outputs therefore fall back to "run everything" once `changed_files` exceeds 3000, or if that count is missing entirely; an absent count compares as `0`, so the `== null` clause is doing real work rather than restating the size check.
 
