@@ -99,6 +99,12 @@ Weekly, `cron: '10 19 * * 2'` — Wednesday 03:10 UTC+8. You can also run it on 
 
 Two other scheduling facts worth knowing: the `schedule` event only fires for workflow files that exist on the **default branch**, and GitHub disables scheduled workflows in a public repository after 60 days with no activity.
 
+### Forks
+
+**The weekly run is upstream-only.** The job is guarded by `github.repository_owner == 'xorbitsai'`, because the scan targets images that only this org publishes — a fork running it on a schedule would spend its own Actions minutes filling its own alert list with our CVEs, which it can do nothing about. GitHub [already disables scheduled workflows when a public repository is forked](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows); the guard also covers a fork that re-enables them.
+
+`workflow_dispatch` is exempt from the guard, so a fork can still run the scan by hand — which is how changes to this workflow get tested without pushing to upstream. A fork that genuinely wants the weekly run should change the `image` values in the matrix to its own images, at which point the guard is the thing to edit too.
+
 ## Operational notes
 
 - **Docker Hub rate limits.** The workflow authenticates with `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD` when those secrets exist, because shared Actions runner IPs hit the anonymous per-IP pull limit easily. On forks, which have no such secrets, the login step skips itself and five weekly anonymous pulls stay well inside the limit.
