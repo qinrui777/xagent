@@ -1,0 +1,12 @@
+# Vulnerabilities excluded from the weekly image scan
+# (.github/workflows/image-security-scan.yml).
+#
+# One CVE id per line. Add an entry only for a risk that has been reviewed and
+# accepted -- not to quiet an alert nobody has looked at yet. Each entry needs a
+# comment saying why, plus the PR that decided it:
+#
+#   # Not reachable: the vulnerable codec is never fed untrusted input. xorbitsai/xagent#0000
+#   CVE-0000-00000
+#
+# Note that unfixed vulnerabilities are already excluded from the Security tab
+# by the workflow's ignore-unfixed, so they do not need an entry here.

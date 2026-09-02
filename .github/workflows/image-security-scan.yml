@@ -1,0 +1,159 @@
+name: Image Security Scan
+
+# Weekly Trivy scan of the images we publish to Docker Hub. Results go to the
+# repository's Security -> Code scanning tab, which gives severity grouping and
+# alert lifecycle (fixed alerts close themselves) for free on a public repo.
+#
+# Reporting only: every step keeps exit-code 0 so a standing pile of upstream
+# CVEs can never turn this into a permanently red workflow that people learn to
+# ignore. See docs/image-security-scanning.md.
+
+on:
+  schedule:
+    # Wednesday 03:10 UTC+8 == Tuesday 19:10 UTC.
+    #
+    # The minute is deliberately not :00. GitHub delays scheduled events under
+    # load and documents the top of every hour as a high-load window, so an
+    # off-hour minute is the one thing we can do about it. Expect the run to
+    # start late regardless -- delivery is best-effort, not punctual, and a
+    # weekly scan does not care.
+    - cron: '10 19 * * 2'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.slug }}
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    env:
+      # Hoisted so the login step can test for its presence: the `secrets`
+      # context is not available in a step-level `if`, but `env` is.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+    strategy:
+      # One bad image must not hide the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - slug: backend-latest
+            image: xprobe/xagent-backend
+            tag: latest
+            large: true
+          - slug: frontend-latest
+            image: xprobe/xagent-frontend
+            tag: latest
+            large: false
+          - slug: sandbox-latest
+            image: xprobe/xagent-sandbox
+            tag: latest
+            large: false
+          # Deliberately not scanned:
+          #   - `nightly`: it is rebuilt daily, so its findings churn without
+          #     telling you anything about what users are running.
+          #   - `buildcache`: buildx cache manifests (13+ GB for the backend),
+          #     not runnable images.
+
+    steps:
+      # Only needed for .trivyignore -- the scan target is the published image,
+      # not this checkout.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # The backend image unpacks to roughly 10 GB, which does not fit in the
+      # default runner's free space. Same action and pin as docker-publish.yml.
+      - name: Free GitHub-hosted runner disk space
+        if: matrix.large
+        uses: endersonmenezes/free-disk-space@e6ed9b02e683a3b55ed0252f1ee469ce3b39a885
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          rm_cmd: rmz
+          rmz_version: "3.1.1"
+
+      # Authenticated pulls avoid Docker Hub's anonymous per-IP rate limit,
+      # which shared Actions runner IPs hit easily. Forks have no DOCKERHUB_*
+      # secrets, so this is skipped there -- five weekly anonymous pulls stay
+      # well inside the limit.
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      # Pull once up front. Both Trivy steps below then read the image from the
+      # local daemon (Trivy's default source priority is docker first), so the
+      # backend's 3.6 GB is downloaded once instead of twice. The images are
+      # multi-arch; we scan amd64 only.
+      - name: Pull image
+        run: docker pull --platform linux/amd64 "${{ matrix.image }}:${{ matrix.tag }}"
+
+      # Full picture, kept as an artifact rather than uploaded as alerts:
+      # every severity including the unfixed ones. This is where you look when
+      # you want to know the real total, not just what is actionable.
+      - name: Scan image (full report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ matrix.tag }}
+          format: json
+          output: trivy-${{ matrix.slug }}.json
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '0'
+          timeout: 30m
+          trivyignores: .trivyignore
+          cache: true
+
+      - name: Upload full report artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-report-${{ matrix.slug }}
+          path: trivy-${{ matrix.slug }}.json
+          retention-days: 30
+
+      # Actionable subset, and the only thing that becomes a code scanning
+      # alert. The backend image carries three dependency trees (Debian + pip +
+      # npm) and produces hundreds of findings, so the Security tab is kept to
+      # what someone can actually act on:
+      #   - ignore-unfixed: only CVEs with a fixed version available
+      #   - CRITICAL/HIGH/MEDIUM only
+      #   - limit-severities-for-sarif is mandatory: without it the SARIF
+      #     writer emits every severity regardless of the `severity` input.
+      - name: Scan image (actionable findings for code scanning)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ matrix.tag }}
+          format: sarif
+          output: trivy-${{ matrix.slug }}.sarif
+          scanners: vuln
+          severity: CRITICAL,HIGH,MEDIUM
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: '0'
+          timeout: 30m
+          trivyignores: .trivyignore
+          cache: true
+
+      # A distinct category per image keeps the five scans as five independent
+      # alert sets: without it each upload would resolve the previous image's
+      # alerts as fixed.
+      - name: Upload results to code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-${{ matrix.slug }}.sarif
+          category: image-scan/${{ matrix.slug }}
