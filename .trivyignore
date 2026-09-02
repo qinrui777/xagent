@@ -8,5 +8,5 @@
 #   # Not reachable: the vulnerable codec is never fed untrusted input. xorbitsai/xagent#0000
 #   CVE-0000-00000
 #
-# Note that unfixed vulnerabilities are already excluded from the Security tab
-# by the workflow's ignore-unfixed, so they do not need an entry here.
+# Note that unfixed vulnerabilities never become code scanning alerts in the
+# first place (the workflow's ignore-unfixed), so they need no entry here.

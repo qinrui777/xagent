@@ -1,7 +1,7 @@
 name: Image Security Scan
 
-# Weekly Trivy scan of the images we publish to Docker Hub. Results go to the
-# repository's Security -> Code scanning tab, which gives severity grouping and
+# Weekly Trivy scan of the images we publish to Docker Hub. Results go to
+# "Security and quality" -> "Code scanning", which gives severity grouping and
 # alert lifecycle (fixed alerts close themselves) for free on a public repo.
 #
 # Reporting only: every step keeps exit-code 0 so a standing pile of upstream
@@ -128,7 +128,7 @@ jobs:
 
       # Actionable subset, and the only thing that becomes a code scanning
       # alert. The backend image carries three dependency trees (Debian + pip +
-      # npm) and produces hundreds of findings, so the Security tab is kept to
+      # npm) and produces hundreds of findings, so the alert list is kept to
       # what someone can actually act on:
       #   - ignore-unfixed: only CVEs with a fixed version available
       #   - CRITICAL/HIGH/MEDIUM only

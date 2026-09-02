@@ -16,7 +16,7 @@ Only `latest` is scanned — what users actually pull. `nightly` is deliberately
 
 ## Where to look
 
-Go to the repository's **Security** tab → **Code scanning** in the left sidebar:
+Go to the repository's **Security and quality** tab → **Code scanning** in the left sidebar (GitHub [renamed the tab from "Security" in April 2026](https://github.blog/changelog/2026-04-02-the-security-tab-is-now-security-quality/); the URL is unchanged):
 
 <https://github.com/xorbitsai/xagent/security/code-scanning>
 
@@ -38,11 +38,11 @@ The page has dropdowns for the common cases, and the search box takes qualifiers
 
 ### Viewing one image at a time
 
-**Not from the Security tab, and this is worth understanding before you trust any per-image number you see there.**
+**Not from the alert list, and this is worth understanding before you trust any per-image number you see there.**
 
 Every image is uploaded under its own SARIF category (`image-scan/backend-latest`, `image-scan/frontend-latest`, `image-scan/sandbox-latest`). That is what keeps the three scans from resolving each other's alerts, but it is not a view you can filter by: [GitHub does not support filtering the alert list by category](https://github.com/orgs/community/discussions/70050).
 
-Worse, **an alert belongs to only one category even when the vulnerability is in several images.** GitHub deduplicates alerts by rule and location, so an identical finding at an identical path in two images becomes one alert, arbitrarily attributed to one of them. The frontend and sandbox images share a `node:22` base, and 17 of the frontend's npm findings sit at the same `usr/local/lib/node_modules/npm/...` paths as the sandbox's. The result: the frontend's own report lists 47 actionable findings, while the Security tab attributes 30 to it and the other 17 to the sandbox. Neither number is wrong, but neither is "the frontend's vulnerability count" either.
+Worse, **an alert belongs to only one category even when the vulnerability is in several images.** GitHub deduplicates alerts by rule and location, so an identical finding at an identical path in two images becomes one alert, arbitrarily attributed to one of them. The frontend and sandbox images share a `node:22` base, and 17 of the frontend's npm findings sit at the same `usr/local/lib/node_modules/npm/...` paths as the sandbox's. The result: the frontend's own report lists 47 actionable findings, while the Code scanning page attributes 30 to it and the other 17 to the sandbox. Neither number is wrong, but neither is "the frontend's vulnerability count" either.
 
 So:
 
@@ -58,7 +58,7 @@ So:
 
 ### The full report
 
-The Security tab deliberately shows a filtered subset (next section). The **complete** report — every severity, including everything with no fix available — is attached to each workflow run as the `trivy-report-<slug>` artifact (JSON, kept 30 days):
+The alert list deliberately shows a filtered subset (next section). The **complete** report — every severity, including everything with no fix available — is attached to each workflow run as the `trivy-report-<slug>` artifact (JSON, kept 30 days):
 
 ```bash
 gh run download <run-id> --repo xorbitsai/xagent -n trivy-report-backend-latest
@@ -66,7 +66,7 @@ gh run download <run-id> --repo xorbitsai/xagent -n trivy-report-backend-latest
 
 Go there when you want the real total rather than the actionable subset.
 
-## Why the Security tab shows less than the artifact
+## Why the alert list shows less than the artifact
 
 The backend image carries Debian, pip and npm dependency trees plus Chrome, Playwright and LibreOffice, and an unfiltered scan of it reports **thousands** of vulnerabilities. An alert list that long gets ignored, which is worse than no alert list. So the code scanning upload is filtered down to what someone can act on:
 
@@ -74,20 +74,20 @@ The backend image carries Debian, pip and npm dependency trees plus Chrome, Play
 - `CRITICAL,HIGH,MEDIUM` only. LOW and UNKNOWN stay in the artifact.
 - `limit-severities-for-sarif: true` — required. Without it Trivy's SARIF writer emits every severity regardless of the `severity` input, and the filter above silently does nothing.
 
-Note that the severity shown in the Security tab is GitHub's own, derived from the CVSS score, so it will not always match Trivy's label — a Trivy MEDIUM can appear as `low`.
+Note that the severity shown on the alert is GitHub's own, derived from the CVSS score, so it will not always match Trivy's label — a Trivy MEDIUM can appear as `low`.
 
 ## Handling an alert
 
 1. Open the alert; it names the package, the installed version and the fixed version.
 2. Decide where the package comes from:
-   - **Debian package** — the base images use floating tags (`python:3.11-bookworm`, `node:22-slim`), so a rebuild usually picks the fix up on its own and the alert closes at the next scan. If it survives several scans, the base image tag itself needs bumping in the relevant `docker/Dockerfile.*`. Note that Debian marks most of its CVEs as not-to-be-fixed, and those never reach the Security tab at all — see the filtering section above.
+   - **Debian package** — the base images use floating tags (`python:3.11-bookworm`, `node:22-slim`), so a rebuild usually picks the fix up on its own and the alert closes at the next scan. If it survives several scans, the base image tag itself needs bumping in the relevant `docker/Dockerfile.*`. Note that Debian marks most of its CVEs as not-to-be-fixed, and those never become alerts at all — see the filtering section above.
    - **pip / npm package** — bump it in `pyproject.toml` or `frontend/package.json`.
    - **Go or Rust binary** — a compiled binary vendored into `node_modules` or `/usr/local/bin`, reported against the toolchain that built it rather than against a package you declare. Bump whatever npm/pip package ships the binary.
 3. If the fix is not viable, add the CVE to [`.trivyignore`](../.trivyignore) with a comment saying why and the PR that decided it. Do not add entries to quiet alerts nobody has reviewed.
 
 ## Failure policy
 
-The workflow never fails. `exit-code` is `0` on every scan step regardless of what is found. A weekly job that goes permanently red because of upstream CVEs stops being read within a month, which defeats the point. Notification is the Security tab's job.
+The workflow never fails. `exit-code` is `0` on every scan step regardless of what is found. A weekly job that goes permanently red because of upstream CVEs stops being read within a month, which defeats the point. Notification is the code scanning alerts' job.
 
 A red run therefore means the scan itself broke — a pull failure, a rate limit, disk exhaustion — not that a vulnerability was found.
 
