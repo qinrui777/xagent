@@ -1,29 +1,20 @@
 name: Image Security Scan
 
-# Weekly Trivy scan of the images we publish to Docker Hub. Results go to
-# "Security and quality" -> "Code scanning", which gives severity grouping and
-# alert lifecycle (fixed alerts close themselves) for free on a public repo.
-#
-# Reporting only: every step keeps exit-code 0 so a standing pile of upstream
-# CVEs can never turn this into a permanently red workflow that people learn to
-# ignore. See docs/image-security-scanning.md.
+# Weekly Trivy scan of the images we publish to Docker Hub. Reporting only:
+# every step keeps exit-code 0, so a red run means the scan itself broke, never
+# that a CVE was found. See docs/image-security-scanning.md.
 
 on:
   schedule:
     # Wednesday 03:10 UTC+8 == Tuesday 19:10 UTC.
-    #
-    # The minute is deliberately not :00. GitHub delays scheduled events under
-    # load and documents the top of every hour as a high-load window, so an
-    # off-hour minute is the one thing we can do about it. Expect the run to
-    # start late regardless -- delivery is best-effort, not punctual, and a
-    # weekly scan does not care.
+    # WHY: the minute avoids :00 because GitHub documents the top of the hour as
+    # a high-load window for scheduled events. Expect the run to start late.
     - cron: '10 19 * * 2'
   workflow_dispatch:
 
 concurrency:
-  # event_name is part of the key: for a schedule run and a workflow_dispatch
-  # against the default branch, github.ref is identical, so without it a manual
-  # re-run would cancel the weekly run and lose that week's upload.
+  # WHY: schedule and workflow_dispatch resolve github.ref identically on the
+  # default branch, so without event_name a manual run cancels the weekly one.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -33,8 +24,8 @@ permissions:
 jobs:
   scan:
     name: Scan ${{ matrix.slug }}
-    # Upstream only: the targets are images that only this org publishes.
-    # workflow_dispatch stays open so a fork can test changes by hand.
+    # WHY: only this org publishes the target images. workflow_dispatch stays
+    # open so a fork can test changes to this workflow by hand.
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'xorbitsai'
     timeout-minutes: 60
     runs-on: ubuntu-latest
@@ -44,12 +35,12 @@ jobs:
       actions: read
 
     env:
-      # Hoisted so the login step can test for its presence: the `secrets`
-      # context is not available in a step-level `if`, but `env` is.
+      # WHY: hoisted so the login step can test for its presence -- the secrets
+      # context is unavailable in a step-level `if`, env is not.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     strategy:
-      # One bad image must not hide the other two.
+      # WHY: one bad image must not hide the other two.
       fail-fast: false
       matrix:
         include:
@@ -65,20 +56,17 @@ jobs:
             image: xprobe/xagent-sandbox
             tag: latest
             large: false
-          # Deliberately not scanned:
-          #   - `nightly`: it is rebuilt daily, so its findings churn without
-          #     telling you anything about what users are running.
-          #   - `buildcache`: buildx cache manifests (13+ GB for the backend),
-          #     not runnable images.
+          # WHY: `nightly` is rebuilt daily so its findings churn, and the
+          # `buildcache` tags are buildx manifests rather than runnable images.
 
     steps:
-      # Only needed for .trivyignore -- the scan target is the published image,
-      # not this checkout.
+      # WHY: needed for .trivyignore only -- the scan target is the published
+      # image, not this checkout.
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # The backend image unpacks to roughly 10 GB, which does not fit in the
-      # default runner's free space. Same action and pin as docker-publish.yml.
+      # WHY: the backend image unpacks to roughly 10 GB, more than a default
+      # runner has free. Same action and pin as docker-publish.yml.
       - name: Free GitHub-hosted runner disk space
         if: matrix.large
         uses: endersonmenezes/free-disk-space@e6ed9b02e683a3b55ed0252f1ee469ce3b39a885
@@ -90,10 +78,9 @@ jobs:
           rm_cmd: rmz
           rmz_version: "3.1.1"
 
-      # Authenticated pulls avoid Docker Hub's anonymous per-IP rate limit,
-      # which shared Actions runner IPs hit easily. Forks have no DOCKERHUB_*
-      # secrets, so this is skipped there -- three weekly anonymous pulls stay
-      # well inside the limit.
+      # WHY: shared Actions runner IPs hit Docker Hub's anonymous per-IP pull
+      # limit easily. Forks have no secrets, and three weekly anonymous pulls
+      # stay well inside it, so skipping the login there is fine.
       - name: Log in to Docker Hub
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v4
@@ -101,16 +88,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      # Pull once up front. Both Trivy steps below then read the image from the
-      # local daemon (Trivy's default source priority is docker first), so the
-      # backend's 3.6 GB is downloaded once instead of twice. The images are
-      # multi-arch; we scan amd64 only.
+      # WHY: both Trivy steps read the image from the local daemon, so pulling
+      # once here downloads the backend's 3.6 GB once instead of twice.
       - name: Pull image
         run: docker pull --platform linux/amd64 "${{ matrix.image }}:${{ matrix.tag }}"
 
-      # Full picture, kept as an artifact rather than uploaded as alerts:
-      # every severity including the unfixed ones. This is where you look when
-      # you want to know the real total, not just what is actionable.
       - name: Scan image (full report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -132,14 +114,9 @@ jobs:
           path: trivy-${{ matrix.slug }}.json
           retention-days: 30
 
-      # Actionable subset, and the only thing that becomes a code scanning
-      # alert. The backend image carries three dependency trees (Debian + pip +
-      # npm) and produces hundreds of findings, so the alert list is kept to
-      # what someone can actually act on:
-      #   - ignore-unfixed: only CVEs with a fixed version available
-      #   - CRITICAL/HIGH/MEDIUM only
-      #   - limit-severities-for-sarif is mandatory: trivy-action's wrapper
-      #     unsets TRIVY_SEVERITY for SARIF output unless this is true.
+      # WARN: limit-severities-for-sarif must stay true -- trivy-action's
+      # wrapper unsets TRIVY_SEVERITY for SARIF output otherwise, which makes
+      # the severity filter below silently do nothing.
       - name: Scan image (actionable findings for code scanning)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -153,15 +130,15 @@ jobs:
           exit-code: '0'
           timeout: 30m
           trivyignores: .trivyignore
-          # The scan above already downloaded the DB and installed the binary,
-          # both of which outlive the step. Restoring the cache again can put an
-          # older day's DB back over the fresh one via the prefix restore-key.
+          # WHY: the scan above already installed the binary and downloaded the
+          # DB, both of which outlive the step. Restoring again can put an older
+          # day's DB back over the fresh one via the prefix restore-key.
           cache: false
           skip-setup-trivy: true
 
-      # A distinct category per image keeps the three scans as three independent
-      # alert sets: without it each upload would resolve the previous image's
-      # alerts as fixed.
+      # WHY: a distinct category per image keeps the three scans as three
+      # independent alert sets -- otherwise each upload resolves the previous
+      # image's alerts as fixed.
       - name: Upload results to code scanning
         uses: github/codeql-action/upload-sarif@v4
         with:
