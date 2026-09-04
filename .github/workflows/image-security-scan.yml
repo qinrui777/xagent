@@ -1,14 +1,13 @@
 name: Image Security Scan
 
 # Weekly Trivy scan of the images we publish to Docker Hub. Reporting only:
-# every step keeps exit-code 0, so a red run means the scan itself broke, never
-# that a CVE was found. See docs/image-security-scanning.md.
+# a red run means the scan broke, not that a CVE was found.
+# See docs/image-security-scanning.md.
 
 on:
   schedule:
     # Wednesday 03:10 UTC+8 == Tuesday 19:10 UTC.
-    # WHY: the minute avoids :00 because GitHub documents the top of the hour as
-    # a high-load window for scheduled events. Expect the run to start late.
+    # WHY: :00 is GitHub's documented high-load window for scheduled events.
     - cron: '10 19 * * 2'
   workflow_dispatch:
 
@@ -24,8 +23,8 @@ permissions:
 jobs:
   scan:
     name: Scan ${{ matrix.slug }}
-    # WHY: only this org publishes the target images. workflow_dispatch stays
-    # open so a fork can test changes to this workflow by hand.
+    # WHY: a fork running this on a schedule would only fill its own alert list
+    # with our CVEs.
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'xorbitsai'
     timeout-minutes: 60
     runs-on: ubuntu-latest
@@ -40,7 +39,6 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     strategy:
-      # WHY: one bad image must not hide the other two.
       fail-fast: false
       matrix:
         include:
@@ -56,17 +54,17 @@ jobs:
             image: xprobe/xagent-sandbox
             tag: latest
             large: false
-          # WHY: `nightly` is rebuilt daily so its findings churn, and the
-          # `buildcache` tags are buildx manifests rather than runnable images.
+          # WHY: `nightly` churns daily, and the `buildcache` tags are buildx
+          # manifests rather than runnable images.
 
     steps:
-      # WHY: needed for .trivyignore only -- the scan target is the published
-      # image, not this checkout.
+      # WHY: only .trivyignore is needed from the repo -- the scan target is the
+      # published image.
       - name: Checkout repository
         uses: actions/checkout@v7
 
       # WHY: the backend image unpacks to roughly 10 GB, more than a default
-      # runner has free. Same action and pin as docker-publish.yml.
+      # runner has free.
       - name: Free GitHub-hosted runner disk space
         if: matrix.large
         uses: endersonmenezes/free-disk-space@e6ed9b02e683a3b55ed0252f1ee469ce3b39a885
@@ -78,9 +76,6 @@ jobs:
           rm_cmd: rmz
           rmz_version: "3.1.1"
 
-      # WHY: shared Actions runner IPs hit Docker Hub's anonymous per-IP pull
-      # limit easily. Forks have no secrets, and three weekly anonymous pulls
-      # stay well inside it, so skipping the login there is fine.
       - name: Log in to Docker Hub
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v4
@@ -88,8 +83,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      # WHY: both Trivy steps read the image from the local daemon, so pulling
-      # once here downloads the backend's 3.6 GB once instead of twice.
+      # WHY: both Trivy steps then read from the local daemon, so the backend's
+      # 3.6 GB is pulled once instead of twice.
       - name: Pull image
         run: docker pull --platform linux/amd64 "${{ matrix.image }}:${{ matrix.tag }}"
 
@@ -114,9 +109,8 @@ jobs:
           path: trivy-${{ matrix.slug }}.json
           retention-days: 30
 
-      # WARN: limit-severities-for-sarif must stay true -- trivy-action's
-      # wrapper unsets TRIVY_SEVERITY for SARIF output otherwise, which makes
-      # the severity filter below silently do nothing.
+      # WARN: limit-severities-for-sarif must stay true -- trivy-action unsets
+      # TRIVY_SEVERITY for SARIF output otherwise, silently ignoring `severity`.
       - name: Scan image (actionable findings for code scanning)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -130,14 +124,12 @@ jobs:
           exit-code: '0'
           timeout: 30m
           trivyignores: .trivyignore
-          # WHY: the scan above already installed the binary and downloaded the
-          # DB, both of which outlive the step. Restoring again can put an older
-          # day's DB back over the fresh one via the prefix restore-key.
+          # WHY: the scan above already installed the binary and fetched the DB,
+          # and a prefix restore-key here can overwrite it with an older day's.
           cache: false
           skip-setup-trivy: true
 
-      # WHY: a distinct category per image keeps the three scans as three
-      # independent alert sets -- otherwise each upload resolves the previous
+      # WHY: without a per-image category, each upload resolves the previous
       # image's alerts as fixed.
       - name: Upload results to code scanning
         uses: github/codeql-action/upload-sarif@v4
