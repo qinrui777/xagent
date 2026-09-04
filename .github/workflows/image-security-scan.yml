@@ -30,12 +30,8 @@ permissions:
 jobs:
   scan:
     name: Scan ${{ matrix.slug }}
-    # Upstream only. The targets are images that only this org publishes, so a
-    # fork that ran this on a schedule would spend its own minutes filling its
-    # own alert list with our CVEs. GitHub already disables scheduled workflows
-    # when a public repo is forked; this also covers a fork that re-enables
-    # them. `workflow_dispatch` is deliberately still allowed everywhere, so a
-    # fork can run it by hand to test changes to this file.
+    # Upstream only: the targets are images that only this org publishes.
+    # workflow_dispatch stays open so a fork can test changes by hand.
     if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'xorbitsai'
     timeout-minutes: 60
     runs-on: ubuntu-latest
