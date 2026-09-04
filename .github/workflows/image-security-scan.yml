@@ -21,7 +21,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # event_name is part of the key: for a schedule run and a workflow_dispatch
+  # against the default branch, github.ref is identical, so without it a manual
+  # re-run would cancel the weekly run and lose that week's upload.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -89,7 +92,7 @@ jobs:
 
       # Authenticated pulls avoid Docker Hub's anonymous per-IP rate limit,
       # which shared Actions runner IPs hit easily. Forks have no DOCKERHUB_*
-      # secrets, so this is skipped there -- five weekly anonymous pulls stay
+      # secrets, so this is skipped there -- three weekly anonymous pulls stay
       # well inside the limit.
       - name: Log in to Docker Hub
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
@@ -135,8 +138,8 @@ jobs:
       # what someone can actually act on:
       #   - ignore-unfixed: only CVEs with a fixed version available
       #   - CRITICAL/HIGH/MEDIUM only
-      #   - limit-severities-for-sarif is mandatory: without it the SARIF
-      #     writer emits every severity regardless of the `severity` input.
+      #   - limit-severities-for-sarif is mandatory: trivy-action's wrapper
+      #     unsets TRIVY_SEVERITY for SARIF output unless this is true.
       - name: Scan image (actionable findings for code scanning)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -150,9 +153,13 @@ jobs:
           exit-code: '0'
           timeout: 30m
           trivyignores: .trivyignore
-          cache: true
+          # The scan above already downloaded the DB and installed the binary,
+          # both of which outlive the step. Restoring the cache again can put an
+          # older day's DB back over the fresh one via the prefix restore-key.
+          cache: false
+          skip-setup-trivy: true
 
-      # A distinct category per image keeps the five scans as five independent
+      # A distinct category per image keeps the three scans as three independent
       # alert sets: without it each upload would resolve the previous image's
       # alerts as fixed.
       - name: Upload results to code scanning

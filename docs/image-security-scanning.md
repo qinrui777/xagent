@@ -42,7 +42,7 @@ The page has dropdowns for the common cases, and the search box takes qualifiers
 
 Every image is uploaded under its own SARIF category (`image-scan/backend-latest`, `image-scan/frontend-latest`, `image-scan/sandbox-latest`). That is what keeps the three scans from resolving each other's alerts, but it is not a view you can filter by: [GitHub does not support filtering the alert list by category](https://github.com/orgs/community/discussions/70050).
 
-Worse, **an alert belongs to only one category even when the vulnerability is in several images.** GitHub deduplicates alerts by rule and location, so an identical finding at an identical path in two images becomes one alert, arbitrarily attributed to one of them. The frontend and sandbox images share a `node:22` base, and 17 of the frontend's npm findings sit at the same `usr/local/lib/node_modules/npm/...` paths as the sandbox's. The result: the frontend's own report lists 47 actionable findings, while the Code scanning page attributes 30 to it and the other 17 to the sandbox. Neither number is wrong, but neither is "the frontend's vulnerability count" either.
+Worse, **counting alerts by category does not give you per-image totals.** GitHub deduplicates alerts by rule and location, so an identical finding at an identical path in two images becomes a single alert. That alert can belong to more than one configuration, but a per-alert view surfaces only one category for it — `most_recent_instance.category`, which the query below reads, is by definition the most recent one — so a shared finding counts towards one image and disappears from the other's total. The frontend and sandbox images share a `node:22` base, and 17 of the frontend's npm findings sit at the same `usr/local/lib/node_modules/npm/...` paths as the sandbox's. Measured on a fork: the frontend's own report lists 47 actionable findings, while counting alerts by category gives the frontend 30 and the sandbox the other 17. Neither number is wrong, but neither is "the frontend's vulnerability count" either.
 
 So:
 
@@ -64,7 +64,7 @@ The alert list deliberately shows a filtered subset (next section). The **comple
 gh run download <run-id> --repo xorbitsai/xagent -n trivy-report-backend-latest
 ```
 
-Go there when you want the real total rather than the actionable subset.
+Go there when you want the real total rather than the actionable subset. One caveat: this artifact is unfiltered by severity and by fix availability, but not by [`.trivyignore`](../.trivyignore) — Trivy reads that file from the repository root by default, so an accepted-risk entry drops out of the artifact as well as out of the alert list.
 
 ## Why the alert list shows less than the artifact
 
@@ -72,7 +72,7 @@ The backend image carries Debian, pip and npm dependency trees plus Chrome, Play
 
 - `ignore-unfixed: true` — only CVEs that have a fixed version available. A vulnerability nobody can patch yet is not a to-do item. This is the filter that does the real work: on the first backend scan it cut 4,554 findings to 399, almost entirely because Debian marks the overwhelming majority of its CVEs as not-to-be-fixed (4,173 Debian findings became 30). What survives is nearly all application-level: pip, npm, and Go/Rust binaries vendored into `node_modules`.
 - `CRITICAL,HIGH,MEDIUM` only. LOW and UNKNOWN stay in the artifact.
-- `limit-severities-for-sarif: true` — required. Without it Trivy's SARIF writer emits every severity regardless of the `severity` input, and the filter above silently does nothing.
+- `limit-severities-for-sarif: true` — required, and this is `trivy-action`'s behaviour rather than Trivy's. The action's `entrypoint.sh` unsets `TRIVY_SEVERITY` before invoking Trivy whenever the format is SARIF and this input is not `true`, which makes the filter above silently do nothing. The Trivy CLI on its own honours `--severity` with `--format sarif`.
 
 Note that the severity shown on the alert is GitHub's own, derived from the CVSS score, so it will not always match Trivy's label — a Trivy MEDIUM can appear as `low`.
 
@@ -107,10 +107,10 @@ Two other scheduling facts worth knowing: the `schedule` event only fires for wo
 
 ## Operational notes
 
-- **Docker Hub rate limits.** The workflow authenticates with `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD` when those secrets exist, because shared Actions runner IPs hit the anonymous per-IP pull limit easily. On forks, which have no such secrets, the login step skips itself and five weekly anonymous pulls stay well inside the limit.
+- **Docker Hub rate limits.** The workflow authenticates with `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD` when those secrets exist, because shared Actions runner IPs hit the anonymous per-IP pull limit easily. On forks, which have no such secrets, the login step skips itself and three weekly anonymous pulls stay well inside the limit.
 - **Disk.** The backend image unpacks to roughly 10 GB, more than a default runner has free, so `free-disk-space` runs first for that image only.
 - **One pull, two scans.** The image is pulled once with `docker pull`; both Trivy steps then read it from the local daemon. Running Trivy twice against the registry would download the backend's 3.6 GB twice.
-- **Trivy DB.** Caching is on, which is what keeps the ghcr.io vulnerability-database pulls under their rate limit.
+- **Trivy DB.** Both scans in a job share one on-disk `TRIVY_CACHE_DIR`, so the vulnerability database is fetched at most once per image — that, not the Actions cache, is why the download shows up once per job. The Actions cache is enabled on the first scan as well, but its key is per-day and GitHub evicts entries unused for 7 days, so on a weekly schedule reuse across runs is plausible rather than reliable.
 - **Cost.** Zero. Code scanning and GitHub-hosted runner minutes are both free for public repositories.
 
 ## Not covered
